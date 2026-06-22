@@ -16,7 +16,6 @@ body {
   background: #0F172A;
   color: #F8FAFC;
   font-family: 'Inter', sans-serif;
-  overflow: hidden;
 }
 
 /* Monaco Breakpoint Dot decoration style */
@@ -89,6 +88,67 @@ body {
 .animate-scale-up {
   animation: scaleUp 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
+
+/* Redesigned landing page custom animations */
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-12px) rotate(0.5deg);
+  }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.15;
+    transform: translate(-50%, -50%) scale(1);
+    filter: blur(120px);
+  }
+  50% {
+    opacity: 0.3;
+    transform: translate(-50%, -50%) scale(1.15);
+    filter: blur(140px);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 10s ease-in-out infinite;
+}
+
+@keyframes drawPointer {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-draw-pointer {
+  stroke-dasharray: 8;
+  animation: drawPointer 1.5s linear infinite;
+}
+
+.bg-grid-pattern {
+  background-size: 50px 50px;
+  background-image: 
+    linear-gradient(to right, rgba(99, 102, 241, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(99, 102, 241, 0.04) 1px, transparent 1px);
+}
+
+/* Glassmorphism utility */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 
 /* Scrollbar styles */
 ::-webkit-scrollbar {

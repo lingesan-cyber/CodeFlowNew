@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Sparkles, Terminal, Activity, GraduationCap } from 'lucide-react';
+import { Terminal, Activity, GraduationCap } from 'lucide-react';
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -57,17 +57,6 @@ export default function Navbar() {
         >
           <GraduationCap size={15} />
           <span>Learn IDE</span>
-        </Link>
-        <Link 
-          href="/practice" 
-          className={`flex items-center space-x-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition-all duration-200 ${
-            pathname === '/practice'
-              ? 'bg-blue-600/10 text-blue-400'
-              : 'text-slate-400 hover:bg-slate-850 hover:text-slate-200'
-          }`}
-        >
-          <Sparkles size={14} />
-          <span>Interactive Practice</span>
         </Link>
       </nav>
 
