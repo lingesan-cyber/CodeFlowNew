@@ -36,17 +36,33 @@ export class JavaParser extends BaseParser {
       return null;
     }
 
-    // Class definition: class ClassName { ... }
-    // We parse it and simply extract its methods and variables.
-    if (t.type === 'KEYWORD' && t.value === 'class') {
-      const startToken = this.next();
+    // Class definition: [modifiers] class ClassName { ... }
+    const modifiers = ['public', 'private', 'protected', 'static', 'final'];
+    let isClass = false;
+    let lookahead = 0;
+    while (lookahead < this.tokens.length - this.cursor) {
+      const peekToken = this.peek(lookahead);
+      if (modifiers.includes(peekToken.value)) {
+        lookahead++;
+      } else if (peekToken.type === 'KEYWORD' && peekToken.value === 'class') {
+        isClass = true;
+        break;
+      } else {
+        break;
+      }
+    }
+
+    if (isClass) {
+      const startToken = this.peek();
+      // Consume modifiers
+      while (modifiers.includes(this.peek().value)) {
+        this.next();
+      }
+      this.consume('KEYWORD', 'class');
       const className = this.consume('IDENTIFIER');
       this.consume('PUNCTUATION', '{');
       const body = this.parseClassBody();
       
-      // For visual simplicity, if there is a main method, we lift its statements
-      // or we can treat them as static/normal functions in the global registry.
-      // We will yield a virtual FunctionDeclaration for each method in the class
       return {
         type: 'FunctionDeclaration',
         name: className.value + '.class_init',
@@ -58,8 +74,7 @@ export class JavaParser extends BaseParser {
     }
 
     // Java method modifiers (public, static, void, etc.)
-    const modifiers = ['public', 'private', 'protected', 'static', 'final'];
-    if (t.type === 'KEYWORD' && modifiers.includes(t.value)) {
+    if (modifiers.includes(t.value)) {
       const startToken = this.peek();
       while (modifiers.includes(this.peek().value)) {
         this.next();
@@ -72,13 +87,24 @@ export class JavaParser extends BaseParser {
       this.consume('PUNCTUATION', '(');
       const params: Array<{ name: string; type: string }> = [];
       while (!this.match('PUNCTUATION', ')') && !this.match('EOF')) {
-        const pType = this.next(); // parameter type
-        const pName = this.consume('IDENTIFIER');
-        // Handle array param brackets `String[] args` or `String args[]`
+        const pTypeToken = this.next(); // parameter type
+        let pType = pTypeToken.value;
+        
+        // Handle String[] args (brackets before name)
         if (this.match('PUNCTUATION', '[') && this.peek(1).value === ']') {
           this.next(); this.next();
+          pType += '[]';
         }
-        params.push({ name: pName.value, type: pType.value });
+        
+        const pName = this.consume('IDENTIFIER');
+        
+        // Handle String args[] (brackets after name)
+        if (this.match('PUNCTUATION', '[') && this.peek(1).value === ']') {
+          this.next(); this.next();
+          pType += '[]';
+        }
+        
+        params.push({ name: pName.value, type: pType });
         if (this.match('PUNCTUATION', ',')) this.next();
       }
       this.consume('PUNCTUATION', ')');

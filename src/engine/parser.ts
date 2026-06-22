@@ -127,7 +127,7 @@ export abstract class BaseParser {
 
   private parseEquality(): Expression {
     let left = this.parseRelational();
-    const ops = ['==', '!='];
+    const ops = ['==', '!=', '===', '!=='];
     while (this.match('OPERATOR') && ops.includes(this.peek().value)) {
       const opToken = this.next();
       const right = this.parseRelational();
@@ -210,7 +210,7 @@ export abstract class BaseParser {
   }
 
   private parseUnary(): Expression {
-    if (this.match('OPERATOR') && (this.peek().value === '!' || this.peek().value === '-' || this.peek().value === '&' || this.peek().value === '*')) {
+    if (this.match('OPERATOR') && (this.peek().value === '!' || this.peek().value === '-' || this.peek().value === '&' || this.peek().value === '*' || this.peek().value === '++' || this.peek().value === '--')) {
       const startToken = this.next();
       const expr = this.parseUnary();
       if (startToken.value === '&') {
@@ -226,6 +226,14 @@ export abstract class BaseParser {
         return {
           type: 'PointerDeref',
           pointerExpr: expr,
+          loc: this.getLoc(startToken)
+        };
+      } else if (startToken.value === '++' || startToken.value === '--') {
+        return {
+          type: 'BinaryOp',
+          left: expr,
+          operator: startToken.value + '_prefix',
+          right: { type: 'Literal', value: 1, valueType: 'number', loc: this.getLoc(startToken) },
           loc: this.getLoc(startToken)
         };
       }
@@ -354,7 +362,15 @@ export abstract class BaseParser {
       };
     }
 
-    if (t.type === 'IDENTIFIER') {
+    const structuralKeywords = [
+      'let', 'var', 'const', 'function', 'return', 'if', 'else', 'for', 'while', 'new', 'free',
+      'def', 'class', 'struct', 'elif', 'and', 'or', 'not', 'delete', 'in', 'import', 'package',
+      'using', 'include', 'from'
+    ];
+    const isIdentifier = t.type === 'IDENTIFIER' || 
+      (t.type === 'KEYWORD' && !structuralKeywords.includes(t.value));
+
+    if (isIdentifier) {
       const token = this.next();
       let expr: Expression = {
         type: 'Identifier',
@@ -362,7 +378,7 @@ export abstract class BaseParser {
         loc: this.getLoc(token)
       };
 
-      // Handle continuous postfixes: member access `.`, array access `[`, function call `(`, pointer arrow `->`
+      // Handle continuous postfixes: member access `.`, array access `[`, function call `(`, pointer arrow `->`, postfix increment/decrement
       while (true) {
         if (this.match('PUNCTUATION', '(')) {
           this.next();
@@ -428,6 +444,19 @@ export abstract class BaseParser {
               line: expr.loc.line,
               columnStart: expr.loc.columnStart,
               columnEnd: propToken.col + propToken.value.length
+            }
+          };
+        } else if (this.match('OPERATOR', '++') || this.match('OPERATOR', '--')) {
+          const opToken = this.next();
+          expr = {
+            type: 'BinaryOp',
+            left: expr,
+            operator: opToken.value + '_postfix',
+            right: { type: 'Literal', value: 1, valueType: 'number', loc: this.getLoc(opToken) },
+            loc: {
+              line: expr.loc.line,
+              columnStart: expr.loc.columnStart,
+              columnEnd: opToken.col + opToken.value.length
             }
           };
         } else {

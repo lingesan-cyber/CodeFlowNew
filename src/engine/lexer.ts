@@ -133,7 +133,16 @@ export function tokenize(code: string, lang: string): Token[] {
     }
 
     // Operators
-    const multiOps = ['==', '!=', '<=', '>=', '&&', '||', '+=', '-=', '->', '<<', '>>'];
+    const tripleOps = ['===', '!=='];
+    const subStr3 = code.slice(i, i + 3);
+    if (tripleOps.includes(subStr3)) {
+      tokens.push({ type: 'OPERATOR', value: subStr3, line, col, index: i });
+      i += 3;
+      col += 3;
+      continue;
+    }
+
+    const multiOps = ['==', '!=', '<=', '>=', '&&', '||', '+=', '-=', '->', '<<', '>>', '++', '--'];
     const subStr = code.slice(i, i + 2);
     if (multiOps.includes(subStr)) {
       tokens.push({ type: 'OPERATOR', value: subStr, line, col, index: i });

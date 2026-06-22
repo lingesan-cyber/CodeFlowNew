@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateExplanation, generateErrorHelp, generateHint, generateQuiz } from '../../../../ai/service';
+import { generateExplanation, generateErrorHelp, generateHint, generateQuiz, generateBatchExplanations, generateChatResponse } from '../../../../ai/service';
 import { AIRequest, AIFeature } from '../../../../ai/types';
 
 const HANDLERS: Record<AIFeature, typeof generateExplanation> = {
   explain_step: generateExplanation,
   explain_error: generateErrorHelp,
   hint: generateHint,
-  quiz: generateQuiz
+  quiz: generateQuiz,
+  explain_batch: generateBatchExplanations,
+  chat: generateChatResponse
 };
 
 export async function POST(req: NextRequest) {

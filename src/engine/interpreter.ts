@@ -76,24 +76,33 @@ export class ASTInterpreter {
     this.addrToVarName.clear();
     this.varNameToAddr.clear();
     
-    // Find functions in global scope and register them (hoisting)
+    // Find functions recursively and register them (hoisting)
     const functionRegistry = new Map<string, FunctionDeclarationNode>();
-    for (const stmt of this.statements) {
-      if (stmt.type === 'FunctionDeclaration') {
-        functionRegistry.set(stmt.name, stmt);
+    const registerFunctions = (stmts: Statement[]) => {
+      for (const stmt of stmts) {
+        if (stmt.type === 'FunctionDeclaration') {
+          functionRegistry.set(stmt.name, stmt);
+          registerFunctions(stmt.body);
+        } else if (stmt.type === 'Conditional') {
+          registerFunctions(stmt.thenBody);
+          if (stmt.elseBody) registerFunctions(stmt.elseBody);
+        } else if (stmt.type === 'Loop') {
+          registerFunctions(stmt.body);
+        }
       }
-    }
+    };
+    registerFunctions(this.statements);
 
-    // Set up main frame
+    // Set up initial global frame
     this.stack.push({
-      functionName: this.lang === 'python' ? 'module' : 'main',
+      functionName: this.lang === 'python' ? 'module' : 'global',
       line: this.statements[0]?.loc.line || 1,
       parameters: {},
       variables: []
     });
 
     try {
-      // Execute the top level statements
+      // Execute the top level statements (including global variables)
       for (const stmt of this.statements) {
         if (stmt.type === 'FunctionDeclaration') continue; // Hoisted
         
@@ -105,6 +114,22 @@ export class ASTInterpreter {
         if (this.stepCount >= this.maxSteps) {
           throw new Error('Maximum execution steps exceeded');
         }
+      }
+
+      // If we are in C, C++, or Java, and a main function was defined, execute it now!
+      const hasMain = functionRegistry.has('main');
+      if (hasMain && (this.lang === 'c' || this.lang === 'cpp' || this.lang === 'java')) {
+        const mainCall: Statement = {
+          type: 'ExpressionStatement',
+          expr: {
+            type: 'FunctionCall',
+            name: 'main',
+            args: [],
+            loc: { line: 1, columnStart: 1, columnEnd: 1 }
+          },
+          loc: { line: 1, columnStart: 1, columnEnd: 1 }
+        };
+        yield* this.executeStatement(mainCall, functionRegistry);
       }
 
       // Finish execution step
@@ -149,7 +174,7 @@ export class ASTInterpreter {
 
     switch (stmt.type) {
       case 'VarDeclaration': {
-        const val = stmt.valueExpr ? this.evaluateExpression(stmt.valueExpr) : undefined;
+        const val = stmt.valueExpr ? yield* this.evaluateExpression(stmt.valueExpr, funcs) : undefined;
         const type = stmt.varType;
         this.declareVariable(stmt.name, val, type);
 
@@ -163,8 +188,8 @@ export class ASTInterpreter {
       }
 
       case 'Assignment': {
-        const val = this.evaluateExpression(stmt.valueExpr);
-        this.assignValue(stmt.target, val);
+        const val = yield* this.evaluateExpression(stmt.valueExpr, funcs);
+        yield* this.assignValue(stmt.target, val, funcs);
 
         yield this.createStep(
           line,
@@ -176,7 +201,7 @@ export class ASTInterpreter {
       }
 
       case 'Conditional': {
-        const cond = this.evaluateExpression(stmt.condition);
+        const cond = yield* this.evaluateExpression(stmt.condition, funcs);
         yield this.createStep(
           line,
           'conditional',
@@ -204,7 +229,7 @@ export class ASTInterpreter {
         }
 
         while (true) {
-          const cond = this.evaluateExpression(stmt.condition);
+          const cond = yield* this.evaluateExpression(stmt.condition, funcs);
           yield this.createStep(
             line,
             'loop_start',
@@ -229,7 +254,7 @@ export class ASTInterpreter {
       }
 
       case 'ReturnStatement': {
-        const val = stmt.valueExpr ? this.evaluateExpression(stmt.valueExpr) : null;
+        const val = stmt.valueExpr ? yield* this.evaluateExpression(stmt.valueExpr, funcs) : null;
         this.returnVal = val;
         this.isReturning = true;
 
@@ -243,7 +268,10 @@ export class ASTInterpreter {
       }
 
       case 'Output': {
-        const outputs = stmt.exprs.map(e => this.evaluateExpression(e));
+        const outputs = [];
+        for (const e of stmt.exprs) {
+          outputs.push(yield* this.evaluateExpression(e, funcs));
+        }
         const outStr = outputs.map(o => (o === null || o === undefined ? 'null' : String(o))).join(' ') + '\n';
         this.stdout += outStr;
 
@@ -298,10 +326,9 @@ export class ASTInterpreter {
         }
 
         if (isAddr) {
-          // pointer target
-          this.assignValue({ type: 'Identifier', name: targetVarName, loc: stmt.target.loc }, parsedVal);
+          yield* this.assignValue({ type: 'Identifier', name: targetVarName, loc: stmt.target.loc }, parsedVal, funcs);
         } else {
-          this.assignValue(stmt.target, parsedVal);
+          yield* this.assignValue(stmt.target, parsedVal, funcs);
         }
 
         yield this.createStep(
@@ -314,7 +341,7 @@ export class ASTInterpreter {
       }
 
       case 'Free': {
-        const addr = this.evaluateExpression(stmt.expr);
+        const addr = yield* this.evaluateExpression(stmt.expr, funcs);
         if (typeof addr === 'string' && this.heap.has(addr)) {
           this.heap.delete(addr);
         }
@@ -329,7 +356,7 @@ export class ASTInterpreter {
       }
 
       case 'ExpressionStatement': {
-        this.evaluateExpression(stmt.expr, funcs);
+        yield* this.evaluateExpression(stmt.expr, funcs);
         break;
       }
     }
@@ -368,7 +395,7 @@ export class ASTInterpreter {
     }
   }
 
-  private assignValue(target: Expression, val: unknown) {
+  private *assignValue(target: Expression, val: unknown, funcs: Map<string, FunctionDeclarationNode>): Generator<ExecutionStep, void, string | undefined> {
     if (target.type === 'Identifier') {
       const name = target.name;
       const variable = this.lookupVariable(name);
@@ -383,7 +410,7 @@ export class ASTInterpreter {
       }
     } else if (target.type === 'PointerDeref') {
       // Write memory address
-      const addr = this.evaluateExpression(target.pointerExpr);
+      const addr = yield* this.evaluateExpression(target.pointerExpr, funcs);
       if (typeof addr === 'string') {
         const stackVarName = this.addrToVarName.get(addr);
         if (stackVarName) {
@@ -395,8 +422,8 @@ export class ASTInterpreter {
         }
       }
     } else if (target.type === 'ArrayAccess') {
-      const arr = this.evaluateExpression(target.arrayExpr);
-      const index = this.evaluateExpression(target.indexExpr);
+      const arr = yield* this.evaluateExpression(target.arrayExpr, funcs);
+      const index = yield* this.evaluateExpression(target.indexExpr, funcs);
       if (typeof arr === 'string' && this.heap.has(arr)) {
         const heapObj = this.heap.get(arr)!;
         if (Array.isArray(heapObj.value)) {
@@ -404,7 +431,7 @@ export class ASTInterpreter {
         }
       }
     } else if (target.type === 'MemberAccess') {
-      const obj = this.evaluateExpression(target.objectExpr);
+      const obj = yield* this.evaluateExpression(target.objectExpr, funcs);
       if (typeof obj === 'string' && this.heap.has(obj)) {
         const heapObj = this.heap.get(obj)!;
         if (heapObj.value && typeof heapObj.value === 'object') {
@@ -425,7 +452,9 @@ export class ASTInterpreter {
     return this.globals.get(name);
   }
 
-  private evaluateExpression(expr: Expression, funcs?: Map<string, FunctionDeclarationNode>): unknown {
+  private *evaluateExpression(expr: Expression, funcs?: Map<string, FunctionDeclarationNode>): Generator<ExecutionStep, unknown, string | undefined> {
+    const activeFuncs = funcs || new Map<string, FunctionDeclarationNode>();
+
     switch (expr.type) {
       case 'Literal':
         return expr.value;
@@ -436,8 +465,8 @@ export class ASTInterpreter {
       }
 
       case 'BinaryOp': {
-        const left = this.evaluateExpression(expr.left, funcs);
-        const right = this.evaluateExpression(expr.right, funcs);
+        const left = yield* this.evaluateExpression(expr.left, activeFuncs);
+        const right = yield* this.evaluateExpression(expr.right, activeFuncs);
         
         switch (expr.operator) {
           case '+': {
@@ -452,6 +481,8 @@ export class ASTInterpreter {
           case '%': return (left as number) % (right as number);
           case '==': return left == right;
           case '!=': return left != right;
+          case '===': return left === right;
+          case '!==': return left !== right;
           case '<': return (left as number) < (right as number);
           case '>': return (left as number) > (right as number);
           case '<=': return (left as number) <= (right as number);
@@ -466,6 +497,26 @@ export class ASTInterpreter {
             return (left as number) + (right as number);
           }
           case '-=': return (left as number) - (right as number);
+          case '++_prefix': {
+            const val = Number(left) + 1;
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
+          case '--_prefix': {
+            const val = Number(left) - 1;
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
+          case '++_postfix': {
+            const val = Number(left) + 1;
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return left;
+          }
+          case '--_postfix': {
+            const val = Number(left) - 1;
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return left;
+          }
           default: return 0;
         }
       }
@@ -476,7 +527,7 @@ export class ASTInterpreter {
       }
 
       case 'PointerDeref': {
-        const addr = this.evaluateExpression(expr.pointerExpr, funcs);
+        const addr = yield* this.evaluateExpression(expr.pointerExpr, activeFuncs);
         if (typeof addr === 'string') {
           const varName = this.addrToVarName.get(addr);
           if (varName) {
@@ -491,7 +542,10 @@ export class ASTInterpreter {
       }
 
       case 'ArrayLiteral': {
-        const els = expr.elements.map(e => this.evaluateExpression(e, funcs));
+        const els = [];
+        for (const e of expr.elements) {
+          els.push(yield* this.evaluateExpression(e, activeFuncs));
+        }
         const heapId = this.getNextHeapAddress();
         this.heap.set(heapId, {
           id: heapId,
@@ -504,7 +558,7 @@ export class ASTInterpreter {
       case 'NewInstance': {
         // Java array new int[5]
         if (expr.className.endsWith('[]')) {
-          const size = this.evaluateExpression(expr.args[0], funcs);
+          const size = yield* this.evaluateExpression(expr.args[0], activeFuncs);
           const els = new Array(size as number).fill(0);
           const heapId = this.getNextHeapAddress();
           this.heap.set(heapId, {
@@ -526,8 +580,8 @@ export class ASTInterpreter {
       }
 
       case 'ArrayAccess': {
-        const arr = this.evaluateExpression(expr.arrayExpr, funcs);
-        const index = this.evaluateExpression(expr.indexExpr, funcs);
+        const arr = yield* this.evaluateExpression(expr.arrayExpr, activeFuncs);
+        const index = yield* this.evaluateExpression(expr.indexExpr, activeFuncs);
         if (typeof arr === 'string' && this.heap.has(arr)) {
           const heapObj = this.heap.get(arr)!;
           return Array.isArray(heapObj.value) ? heapObj.value[index as number] : null;
@@ -536,7 +590,7 @@ export class ASTInterpreter {
       }
 
       case 'MemberAccess': {
-        const obj = this.evaluateExpression(expr.objectExpr, funcs);
+        const obj = yield* this.evaluateExpression(expr.objectExpr, activeFuncs);
         if (typeof obj === 'string' && this.heap.has(obj)) {
           const heapObj = this.heap.get(obj)!;
           return heapObj.value && typeof heapObj.value === 'object'
@@ -559,38 +613,14 @@ export class ASTInterpreter {
         }
 
         // Look up functions
-        if (funcs && funcs.has(expr.name)) {
-          const funcDecl = funcs.get(expr.name)!;
-          const args = expr.args.map(a => this.evaluateExpression(a, funcs));
+        if (activeFuncs.has(expr.name)) {
+          const funcDecl = activeFuncs.get(expr.name)!;
+          const args = [];
+          for (const a of expr.args) {
+            args.push(yield* this.evaluateExpression(a, activeFuncs));
+          }
 
-          // Set up function frame parameters
-          const paramsObj: Record<string, Variable> = {};
-          const localNames: string[] = [];
-          
-          funcDecl.params.forEach((p, idx) => {
-            const val = args[idx] !== undefined ? args[idx] : null;
-            const paramVar: Variable = {
-              name: p.name,
-              value: val,
-              type: p.type,
-              scope: 'parameter',
-              isReference: p.type.includes('*') || p.type.includes('[]')
-            };
-            paramsObj[p.name] = paramVar;
-            localNames.push(p.name);
-          });
-
-          // Push new frame
-          const newFrame: StackFrame = {
-            functionName: expr.name,
-            line: funcDecl.loc.line,
-            parameters: paramsObj,
-            variables: localNames
-          };
-          this.stack.push(newFrame);
-
-          // Fallback: If we evaluate this as an expression in a statement, we execute function statements:
-          this.executeFunctionInline(funcDecl, args, funcs);
+          yield* this.executeFunctionInline(funcDecl, args, activeFuncs);
           
           const result = this.returnVal;
           this.returnVal = null;
@@ -605,11 +635,15 @@ export class ASTInterpreter {
   }
 
   // Executes function calls statement-by-statement inside the main generator
-  private executeFunctionInline(funcDecl: FunctionDeclarationNode, args: unknown[], funcs: Map<string, FunctionDeclarationNode>) {
-    // Setup frame
+  private *executeFunctionInline(
+    funcDecl: FunctionDeclarationNode,
+    args: unknown[],
+    funcs: Map<string, FunctionDeclarationNode>
+  ): Generator<ExecutionStep, void, string | undefined> {
+    // Setup frame parameters
     const paramsObj: Record<string, Variable> = {};
     const localNames: string[] = [];
-    
+
     funcDecl.params.forEach((p, idx) => {
       const val = args[idx] !== undefined ? args[idx] : null;
       const paramVar: Variable = {
@@ -629,93 +663,27 @@ export class ASTInterpreter {
       parameters: paramsObj,
       variables: localNames
     };
-    
+
     this.stack.push(frame);
 
-    // Create a new runner just for the statements in this block, but run them in this interpreter context
-    // This allows function tracing!
-    // Since we're executing inline inside evaluateExpression, we walk the function block statements.
-    // If statements yield traces, we can call a sub-runner or run them.
-    // Let's walk the block statements:
+    // Yield a step for function entry
+    yield this.createStep(
+      funcDecl.loc.line,
+      'call',
+      `Call function "${funcDecl.name}" with arguments: ${args.map(a => JSON.stringify(a)).join(', ')}`,
+      funcDecl.loc
+    );
+
     const savedReturning = this.isReturning;
     this.isReturning = false;
 
-    // To keep it simple, we run the statements sequentially. If we find nested calls, they also execute.
-    // This executes synchronously inside evaluateExpression.
-    // Note: since statements will yield, but we are inside evaluateExpression (synchronous), 
-    // we can execute statements by running their logic.
     for (const stmt of funcDecl.body) {
       if (this.isReturning) break;
-      this.executeStatementSync(stmt, funcs);
+      yield* this.executeStatement(stmt, funcs);
     }
 
     this.stack.pop();
     this.isReturning = savedReturning;
-  }
-
-  // Synchronous statement runner helper for function calls
-  private executeStatementSync(stmt: Statement, funcs: Map<string, FunctionDeclarationNode>) {
-    switch (stmt.type) {
-      case 'VarDeclaration': {
-        const val = stmt.valueExpr ? this.evaluateExpression(stmt.valueExpr, funcs) : undefined;
-        this.declareVariable(stmt.name, val, stmt.varType);
-        break;
-      }
-      case 'Assignment': {
-        const val = this.evaluateExpression(stmt.valueExpr, funcs);
-        this.assignValue(stmt.target, val);
-        break;
-      }
-      case 'Conditional': {
-        const cond = this.evaluateExpression(stmt.condition, funcs);
-        if (cond) {
-          for (const s of stmt.thenBody) {
-            this.executeStatementSync(s, funcs);
-            if (this.isReturning) break;
-          }
-        } else if (stmt.elseBody) {
-          for (const s of stmt.elseBody) {
-            this.executeStatementSync(s, funcs);
-            if (this.isReturning) break;
-          }
-        }
-        break;
-      }
-      case 'Loop': {
-        if (stmt.init) this.executeStatementSync(stmt.init, funcs);
-        while (true) {
-          const cond = this.evaluateExpression(stmt.condition, funcs);
-          if (!cond) break;
-          for (const s of stmt.body) {
-            this.executeStatementSync(s, funcs);
-            if (this.isReturning) break;
-          }
-          if (this.isReturning) break;
-          if (stmt.update) this.executeStatementSync(stmt.update, funcs);
-        }
-        break;
-      }
-      case 'ReturnStatement': {
-        const val = stmt.valueExpr ? this.evaluateExpression(stmt.valueExpr, funcs) : null;
-        this.returnVal = val;
-        this.isReturning = true;
-        break;
-      }
-      case 'Output': {
-        const outputs = stmt.exprs.map(e => this.evaluateExpression(e, funcs));
-        this.stdout += outputs.map(o => (o === null || o === undefined ? 'null' : String(o))).join(' ') + '\n';
-        break;
-      }
-      case 'Free': {
-        const addr = this.evaluateExpression(stmt.expr, funcs);
-        if (typeof addr === 'string') this.heap.delete(addr);
-        break;
-      }
-      case 'ExpressionStatement': {
-        this.evaluateExpression(stmt.expr, funcs);
-        break;
-      }
-    }
   }
 
   private createStep(

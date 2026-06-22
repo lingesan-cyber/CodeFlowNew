@@ -144,6 +144,15 @@ export class CPPParser extends BaseParser {
       }
 
       // Regular variable declaration e.g. int x = 10;
+      if (this.match('PUNCTUATION', '[')) {
+        this.next(); // consume [
+        if (!this.match('PUNCTUATION', ']')) {
+          this.parseExpression();
+        }
+        this.consume('PUNCTUATION', ']');
+        varType += '[]';
+      }
+
       let valueExpr: Expression | undefined;
       if (this.match('OPERATOR', '=')) {
         this.next();

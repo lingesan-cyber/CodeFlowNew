@@ -1,10 +1,14 @@
-import { ExecutionOperation, Variable, StackFrame, ExecutionError, SupportedLanguage } from '../engine/types';
+import { ExecutionOperation, Variable, StackFrame, ExecutionError, SupportedLanguage, ExecutionStep } from '../engine/types';
 
 export interface AIRequest {
-  feature: 'explain_step' | 'explain_error' | 'hint' | 'quiz';
+  feature: 'explain_step' | 'explain_error' | 'hint' | 'quiz' | 'explain_batch' | 'chat';
   context: ExecutionContext;
   userMessage?: string;      // Optional user follow-up
   language: SupportedLanguage;
+  trace?: ExecutionStep[];
+  chatHistory?: { role: 'user' | 'assistant'; content: string }[];
+  selectedItem?: { name: string; type: 'variable' | 'array_element' | 'frame'; details?: string } | null;
+  teachingMode?: 'beginner' | 'intermediate' | 'advanced' | 'interview' | 'debug';
 }
 
 export interface ExecutionContext {
@@ -41,7 +45,7 @@ export interface AIProviderConfig {
 }
 
 export type AIProvider = 'ollama' | 'openai' | 'gemini' | 'anthropic' | 'custom';
-export type AIFeature = 'explain_step' | 'explain_error' | 'hint' | 'quiz';
+export type AIFeature = 'explain_step' | 'explain_error' | 'hint' | 'quiz' | 'explain_batch' | 'chat';
 
 export interface AIProviderAdapter {
   readonly name: AIProvider;

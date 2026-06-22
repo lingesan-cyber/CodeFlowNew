@@ -3,8 +3,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useCodeFlowStore } from '../../store/useCodeFlowStore';
 import { createSpring, updateSpring } from '../../utils/spring';
-import { Keyboard } from 'lucide-react';
-import { Variable, StackFrame, HeapObject } from '../../engine/types';
+import { Keyboard, RotateCcw } from 'lucide-react';
+import { Variable, StackFrame, HeapObject, ExecutionStep } from '../../engine/types';
 
 interface RenderNode {
   id: string;
@@ -13,139 +13,283 @@ interface RenderNode {
   subLabel?: string;
   x: { current: number; target: number; velocity: number };
   y: { current: number; target: number; velocity: number };
+  opacity: { current: number; target: number; velocity: number };
+  isRemoving?: boolean;
   width: number;
   height: number;
   data: Variable | StackFrame | HeapObject;
+  prevValue?: string;
+  currentValue?: string;
+  valueChangeTime?: number;
+  slotFlashes?: Record<number, { changeTime: number; oldValue: string }>;
 }
+
+interface HistoryEntry {
+  stepIndex: number;
+  line: number;
+  name: string;
+  oldValue: string;
+  newValue: string;
+}
+
+// Map variables/heap types to distinct educational colors
+function getTypeTheme(type: string, value: unknown) {
+  const typeLower = (type || '').toLowerCase();
+  
+  // Array/Vector types (Purple)
+  if (
+    typeLower.includes('[]') ||
+    typeLower === 'array' ||
+    typeLower.startsWith('vector') ||
+    typeLower.startsWith('list') ||
+    Array.isArray(value)
+  ) {
+    return {
+      name: 'Array',
+      bg: 'rgba(88, 28, 135, 0.45)',      // Deep purple
+      border: '#8B5CF6',                  // Vibrant purple
+      glow: 'rgba(139, 92, 246, 0.4)',
+      accent: '#A78BFA'
+    };
+  }
+
+  // Boolean types (Amber)
+  if (
+    typeLower === 'bool' ||
+    typeLower === 'boolean' ||
+    typeof value === 'boolean'
+  ) {
+    return {
+      name: 'Boolean',
+      bg: 'rgba(120, 53, 15, 0.45)',      // Deep amber
+      border: '#F59E0B',                  // Vibrant amber
+      glow: 'rgba(245, 158, 11, 0.4)',
+      accent: '#FBBF24'
+    };
+  }
+
+  // String/Character types (Green)
+  if (
+    typeLower === 'string' ||
+    typeLower === 'char' ||
+    typeLower === 'str' ||
+    typeLower === 'character' ||
+    typeof value === 'string'
+  ) {
+    return {
+      name: 'String',
+      bg: 'rgba(6, 78, 59, 0.45)',        // Deep emerald
+      border: '#10B981',                  // Vibrant emerald
+      glow: 'rgba(16, 185, 129, 0.4)',
+      accent: '#34D399'
+    };
+  }
+
+  // Number/Float/Double types (Blue)
+  if (
+    typeLower === 'int' ||
+    typeLower === 'double' ||
+    typeLower === 'float' ||
+    typeLower === 'number' ||
+    typeLower === 'long' ||
+    typeLower === 'short' ||
+    typeLower === 'byte' ||
+    typeof value === 'number'
+  ) {
+    return {
+      name: 'Number',
+      bg: 'rgba(30, 58, 138, 0.45)',       // Deep blue
+      border: '#3B82F6',                   // Vibrant blue
+      glow: 'rgba(59, 130, 246, 0.4)',
+      accent: '#60A5FA'
+    };
+  }
+
+  // Objects/Structures/Pointers/Classes (Cyan)
+  return {
+    name: type || 'Object',
+    bg: 'rgba(22, 78, 99, 0.45)',         // Deep cyan
+    border: '#06B6D4',                    // Vibrant cyan
+    glow: 'rgba(6, 182, 212, 0.4)',
+    accent: '#22D3EE'
+  };
+}
+
+// Compute the last 3 variable modifications
+const getMemoryHistory = (steps: ExecutionStep[], currentIndex: number): HistoryEntry[] => {
+  const history: HistoryEntry[] = [];
+  
+  for (let i = 1; i <= currentIndex; i++) {
+    if (i >= steps.length) break;
+    const prevStep = steps[i - 1];
+    const currStep = steps[i];
+    
+    // Check variables that changed
+    currStep.variables.forEach(v => {
+      const prevV = prevStep.variables.find(pv => pv.name === v.name && pv.scope === v.scope);
+      const oldVal = prevV ? (prevV.value === null ? 'null' : String(prevV.value)) : 'undefined';
+      const newVal = v.value === null ? 'null' : String(v.value);
+      if (oldVal !== newVal) {
+        history.push({
+          stepIndex: i,
+          line: currStep.lineNumber,
+          name: v.name,
+          oldValue: oldVal,
+          newValue: newVal
+        });
+      }
+    });
+
+    // Check heap objects that changed
+    currStep.heap.forEach(h => {
+      const prevH = prevStep.heap.find(ph => ph.id === h.id);
+      if (prevH) {
+        const hArr = h.value as unknown[];
+        const prevArr = prevH.value as unknown[];
+        if (Array.isArray(hArr) && Array.isArray(prevArr)) {
+          hArr.forEach((val, idx) => {
+            const oldVal = prevArr[idx];
+            if (oldVal !== val) {
+              history.push({
+                stepIndex: i,
+                line: currStep.lineNumber,
+                name: `${h.id}[${idx}]`,
+                oldValue: oldVal === null ? 'null' : String(oldVal),
+                newValue: val === null ? 'null' : String(val)
+              });
+            }
+          });
+        } else if (typeof h.value === 'object' && typeof prevH.value === 'object' && h.value && prevH.value) {
+          const currVal = h.value as Record<string, unknown>;
+          const prevVal = prevH.value as Record<string, unknown>;
+          Object.keys(currVal).forEach(key => {
+            if (currVal[key] !== prevVal[key]) {
+              history.push({
+                stepIndex: i,
+                line: currStep.lineNumber,
+                name: `${h.id}.${key}`,
+                oldValue: prevVal[key] === undefined ? 'undefined' : String(prevVal[key]),
+                newValue: String(currVal[key])
+              });
+            }
+          });
+        }
+      }
+    });
+  }
+
+  // Return the last 3 changes
+  return history.slice(-3).reverse();
+};
 
 export default function VisualizerCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const zoomSpanRef = useRef<HTMLSpanElement | null>(null);
   
   // Zustand State
   const {
     steps,
     currentStepIndex,
     awaitingInput,
-    submitInput
+    submitInput,
+    selectedItem,
+    setSelectedItem
   } = useCodeFlowStore();
 
-  // Zoom & Pan State
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  // Auto-Fit Toggle State
+  const [autoFit, setAutoFit] = useState(true);
+
+  // Zoom & Pan Springs for ultra-smooth transitions
+  const zoomSpringRef = useRef(createSpring(1));
+  const panXSpringRef = useRef(createSpring(0));
+  const panYSpringRef = useRef(createSpring(0));
+
+  // User Pan Interaction States
   const isDraggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0 });
+  const clickPosRef = useRef({ x: 0, y: 0 });
 
   // Spring Node Map
   const nodesRef = useRef<Map<string, RenderNode>>(new Map());
   const animationFrameIdRef = useRef<number | null>(null);
 
+  // Hover detection ref
+  const hoveredNodeIdRef = useRef<string | null>(null);
+
   // Input Field State
   const [inputValue, setInputValue] = useState('');
 
-  // Handle Resize
+  // Handle Resize using ResizeObserver on the container to detect sidebar transitions
   useEffect(() => {
-    const handleResize = () => {
-      const canvas = canvasRef.current;
-      const container = containerRef.current;
-      if (!canvas || !container) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const canvas = canvasRef.current;
+        if (!canvas) continue;
+        const { width, height } = entry.contentRect;
+        canvas.width = width;
+        canvas.height = height;
+      }
+    });
+
+    resizeObserver.observe(container);
+
+    const canvas = canvasRef.current;
+    if (canvas) {
       canvas.width = container.clientWidth;
       canvas.height = container.clientHeight;
-    };
-
-    window.addEventListener('resize', handleResize);
-    handleResize();
+    }
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
     };
   }, []);
 
   // Update layout coordinates for active variables, stack frames, and heap objects
   const updateLayout = useCallback((width: number, height: number) => {
     if (steps.length === 0 || currentStepIndex >= steps.length) {
-      nodesRef.current.clear();
+      // Fade out everything
+      for (const [, node] of nodesRef.current) {
+        node.opacity.target = 0;
+        node.isRemoving = true;
+      }
       return;
     }
 
     const step = steps[currentStepIndex];
     const { variables, callStack, heap } = step;
-
-    // We will define target layouts:
-    // 1. Stack frames (parameters & locals) -> Left-Center column
-    // 2. Global variables -> Top-Left area
-    // 3. Heap objects -> Bottom area
-    // 4. Call Stack (functions) -> Right column
-
     const activeNodes = new Set<string>();
 
-    // Position helper offsets
-    const globalX = 50;
-    let globalY = 60;
-    const globalWidth = 240;
+    // Design layout:
+    // Left: Variables column (Globals + Current active Frame Locals)
+    // Right: Call Stack (Function frames stacked vertically)
+    // Center: Memory Heap (DYNAMIC heap cells)
+    const margin = 50;
+    const leftColWidth = 260;
+    const rightColWidth = 220;
+    const heapColWidth = 280;
 
-    const localX = 320;
-    let localY = 60;
-    const localWidth = 240;
+    const varX = margin;
+    const stackX = width - rightColWidth - margin;
+    // Mathematically center the heap between the left column and right column
+    const heapX = varX + leftColWidth + ((stackX - (varX + leftColWidth)) - heapColWidth) / 2;
 
-    const stackFrameX = 600;
-    const stackFrameY = 60;
-    const stackFrameWidth = 180;
-    const stackFrameHeight = 60;
+    const stackFrameHeight = 70;
+    const heapCardHeight = 135;
 
-    const heapXStart = 80;
-    const heapY = height - 180;
-    const heapWidth = 220;
-    const heapHeight = 110;
-
-    // --- Process Globals and Locals ---
-    variables.forEach((v) => {
-      const isGlobal = v.scope === 'global';
-      const nodeId = `var_${v.name}_${v.scope}`;
-      activeNodes.add(nodeId);
-
-      const targetX = isGlobal ? globalX : localX;
-      const targetY = isGlobal ? globalY : localY;
-      const w = isGlobal ? globalWidth : localWidth;
-      let h = 55;
-
-      if (v.type.includes('[]') || v.type === 'array') {
-        h = 80; // Expand for array indexing boxes
-      }
-
-      if (isGlobal) {
-        globalY += h + 15;
-      } else {
-        localY += h + 15;
-      }
-
-      let node = nodesRef.current.get(nodeId);
-      if (!node) {
-        // Spawn from side
-        node = {
-          id: nodeId,
-          type: 'variable',
-          label: v.name,
-          x: createSpring(targetX - 100),
-          y: createSpring(targetY),
-          width: w,
-          height: h,
-          data: v
-        };
-      }
-      node.x.target = targetX;
-      node.y.target = targetY;
-      node.data = v; // Update dynamic value
-      nodesRef.current.set(nodeId, node);
-    });
-
-    // --- Process Call Stack ---
+    // 1. Arrange Call Stack (Right Column)
+    // Grow downwards, with the active frame (most recent, top of stack) at the very top
+    const stackFrameY = 80;
     callStack.forEach((frame, index) => {
       const nodeId = `frame_${frame.functionName}_${index}`;
       activeNodes.add(nodeId);
 
-      const targetX = stackFrameX;
-      const targetY = stackFrameY + index * (stackFrameHeight + 15);
+      const targetX = stackX;
+      // Stacking logic: reverse order so the top stack frame (length - 1 - index) is at the top of the column
+      const targetY = stackFrameY + (callStack.length - 1 - index) * (stackFrameHeight + 15);
 
       let node = nodesRef.current.get(nodeId);
       if (!node) {
@@ -153,26 +297,122 @@ export default function VisualizerCanvas() {
           id: nodeId,
           type: 'frame',
           label: frame.functionName,
-          x: createSpring(width + 100),
+          x: createSpring(width + 100), // Slide in from right edge
           y: createSpring(targetY),
-          width: stackFrameWidth,
+          opacity: createSpring(0),
+          width: rightColWidth,
           height: stackFrameHeight,
           data: frame
         };
       }
       node.x.target = targetX;
       node.y.target = targetY;
+      node.opacity.target = 1;
       node.data = frame;
       nodesRef.current.set(nodeId, node);
     });
 
-    // --- Process Heap ---
+    // 2. Arrange Variables (Left Column)
+    let currentY = 80;
+    const globals = variables.filter(v => v.scope === 'global');
+    const locals = variables.filter(v => v.scope === 'local' || v.scope === 'parameter');
+
+    // Add Globals
+    if (globals.length > 0) {
+      currentY += 25; // Space for header
+      globals.forEach(v => {
+        const nodeId = `var_${v.name}_${v.scope}`;
+        activeNodes.add(nodeId);
+
+        const cardH = (v.type.includes('[]') || v.type === 'array') ? 110 : 70;
+        const targetX = varX;
+        const targetY = currentY;
+        currentY += cardH + 15;
+
+        let node = nodesRef.current.get(nodeId);
+        if (!node) {
+          node = {
+            id: nodeId,
+            type: 'variable',
+            label: v.name,
+            x: createSpring(targetX - 100), // Slide in from left edge
+            y: createSpring(targetY),
+            opacity: createSpring(0),
+            width: leftColWidth,
+            height: cardH,
+            data: v
+          };
+        }
+        node.x.target = targetX;
+        node.y.target = targetY;
+        node.opacity.target = 1;
+
+        // Track value changes
+        if (node.data && node.data !== v) {
+          const prevVar = node.data as Variable;
+          if (prevVar.value !== v.value || prevVar.referencedId !== v.referencedId) {
+            node.prevValue = prevVar.value === null ? 'null' : String(prevVar.value);
+            node.currentValue = v.value === null ? 'null' : String(v.value);
+            node.valueChangeTime = Date.now();
+          }
+        }
+        node.data = v;
+        nodesRef.current.set(nodeId, node);
+      });
+    }
+
+    // Add Locals
+    if (locals.length > 0) {
+      currentY += 25; // Space for header
+      locals.forEach(v => {
+        const nodeId = `var_${v.name}_${v.scope}`;
+        activeNodes.add(nodeId);
+
+        const cardH = (v.type.includes('[]') || v.type === 'array') ? 110 : 70;
+        const targetX = varX;
+        const targetY = currentY;
+        currentY += cardH + 15;
+
+        let node = nodesRef.current.get(nodeId);
+        if (!node) {
+          node = {
+            id: nodeId,
+            type: 'variable',
+            label: v.name,
+            x: createSpring(targetX - 100),
+            y: createSpring(targetY),
+            opacity: createSpring(0),
+            width: leftColWidth,
+            height: cardH,
+            data: v
+          };
+        }
+        node.x.target = targetX;
+        node.y.target = targetY;
+        node.opacity.target = 1;
+
+        // Track value changes
+        if (node.data && node.data !== v) {
+          const prevVar = node.data as Variable;
+          if (prevVar.value !== v.value || prevVar.referencedId !== v.referencedId) {
+            node.prevValue = prevVar.value === null ? 'null' : String(prevVar.value);
+            node.currentValue = v.value === null ? 'null' : String(v.value);
+            node.valueChangeTime = Date.now();
+          }
+        }
+        node.data = v;
+        nodesRef.current.set(nodeId, node);
+      });
+    }
+
+    // 3. Arrange Heap (Center Column)
+    const heapYStart = 80;
     heap.forEach((obj, index) => {
       const nodeId = `heap_${obj.id}`;
       activeNodes.add(nodeId);
 
-      const targetX = heapXStart + index * (heapWidth + 25);
-      const targetY = heapY;
+      const targetX = heapX;
+      const targetY = heapYStart + index * (heapCardHeight + 20);
 
       let node = nodesRef.current.get(nodeId);
       if (!node) {
@@ -182,25 +422,86 @@ export default function VisualizerCanvas() {
           label: obj.id,
           subLabel: obj.type,
           x: createSpring(targetX),
-          y: createSpring(height + 100),
-          width: heapWidth,
-          height: heapHeight,
+          y: createSpring(height + 100), // Slide in from bottom
+          opacity: createSpring(0),
+          width: heapColWidth,
+          height: heapCardHeight,
           data: obj
         };
       }
       node.x.target = targetX;
       node.y.target = targetY;
+      node.opacity.target = 1;
+
+      // Track array slot changes
+      const prevObj = node.data as HeapObject;
+      if (prevObj && Array.isArray(prevObj.value) && Array.isArray(obj.value)) {
+        if (!node.slotFlashes) node.slotFlashes = {};
+        obj.value.forEach((newVal, idx) => {
+          const oldVal = (prevObj.value as unknown[])[idx];
+          if (oldVal !== undefined && oldVal !== newVal) {
+            node.slotFlashes![idx] = {
+              changeTime: Date.now(),
+              oldValue: oldVal === null ? 'null' : String(oldVal)
+            };
+          }
+        });
+      }
+
       node.data = obj;
       nodesRef.current.set(nodeId, node);
     });
 
     // Remove inactive nodes
-    for (const [id] of nodesRef.current) {
+    for (const [id, node] of nodesRef.current) {
       if (!activeNodes.has(id)) {
-        nodesRef.current.delete(id);
+        if (!node.isRemoving) {
+          node.isRemoving = true;
+          node.opacity.target = 0;
+        }
       }
     }
-  }, [steps, currentStepIndex]);
+
+    // 4. Compute Auto-Fit Camera Pan & Zoom bounds
+    if (activeNodes.size > 0 && autoFit) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+
+      activeNodes.forEach(id => {
+        const node = nodesRef.current.get(id);
+        if (node) {
+          minX = Math.min(minX, node.x.target);
+          maxX = Math.max(maxX, node.x.target + node.width);
+          minY = Math.min(minY, node.y.target);
+          maxY = Math.max(maxY, node.y.target + node.height);
+        }
+      });
+
+      if (minX !== Infinity) {
+        const bboxW = maxX - minX;
+        const bboxH = maxY - minY;
+        const paddingX = 80;
+        const paddingY = 80;
+
+        let targetZoom = Math.min(
+          width / (bboxW + paddingX * 2),
+          height / (bboxH + paddingY * 2)
+        );
+
+        // Clamp auto-fit zoom between 0.8 and 1.1 to keep fonts readable and prevent motion sickness
+        targetZoom = Math.max(0.8, Math.min(targetZoom, 1.1));
+
+        const targetPanX = (width - bboxW * targetZoom) / 2 - minX * targetZoom;
+        const targetPanY = (height - bboxH * targetZoom) / 2 - minY * targetZoom;
+
+        zoomSpringRef.current.target = targetZoom;
+        panXSpringRef.current.target = targetPanX;
+        panYSpringRef.current.target = targetPanY;
+      }
+    }
+  }, [steps, currentStepIndex, autoFit]);
 
   // Main Canvas Render Loop
   useEffect(() => {
@@ -221,247 +522,555 @@ export default function VisualizerCanvas() {
         return;
       }
 
-      // 1. Update Springs
-      for (const [, node] of nodesRef.current) {
+
+      // Define layouts constants here
+      const margin = 50;
+      const leftColWidth = 260;
+      const rightColWidth = 220;
+      const heapColWidth = 280;
+
+      const varX = margin;
+      const stackX = canvas.width - rightColWidth - margin;
+
+      // 1. Update Springs (Node positions + opacity)
+      for (const [id, node] of nodesRef.current) {
         node.x = updateSpring(node.x);
         node.y = updateSpring(node.y);
+        node.opacity = updateSpring(node.opacity);
+        if (node.isRemoving && node.opacity.current < 0.05) {
+          nodesRef.current.delete(id);
+        }
       }
 
-      // Clean screen
-      ctx.fillStyle = '#0F172A';
+      // Update Camera Springs (stiffness = 0.08, damping = 0.8 for smooth buttery camera slides)
+      zoomSpringRef.current = updateSpring(zoomSpringRef.current, 0.08, 0.8);
+      panXSpringRef.current = updateSpring(panXSpringRef.current, 0.08, 0.8);
+      panYSpringRef.current = updateSpring(panYSpringRef.current, 0.08, 0.8);
+
+      const currentZoom = zoomSpringRef.current.current;
+      const currentPanX = panXSpringRef.current.current;
+      const currentPanY = panYSpringRef.current.current;
+
+      // Update the DOM ref for Zoom text directly to bypass React renders
+      if (zoomSpanRef.current) {
+        zoomSpanRef.current.textContent = `${Math.round(currentZoom * 100)}%`;
+      }
+
+      // 2. Draw Premium Radial Background
+      const radialGrad = ctx.createRadialGradient(
+        canvas.width / 2, canvas.height / 2, 50,
+        canvas.width / 2, canvas.height / 2, Math.max(canvas.width, canvas.height) / 1.1
+      );
+      radialGrad.addColorStop(0, '#1E293B'); // slate-800
+      radialGrad.addColorStop(1, '#080C14'); // ultra dark slate
+      ctx.fillStyle = radialGrad;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       ctx.save();
-      // Apply Pan & Zoom
-      ctx.translate(pan.x, pan.y);
-      ctx.scale(zoom, zoom);
+      // Apply smooth Pan & Zoom
+      ctx.translate(currentPanX, currentPanY);
+      ctx.scale(currentZoom, currentZoom);
 
-      // --- Draw Grid ---
-      ctx.strokeStyle = '#1E293B';
+      // --- Subtle Grid (Extremely faint to avoid visual noise) ---
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.015)';
       ctx.lineWidth = 1;
-      const gridSize = 40;
-      for (let x = -pan.x; x < canvas.width / zoom - pan.x; x += gridSize) {
+      const gridSize = 50;
+      // Grid coordinates mapped based on panning
+      const startGridX = Math.floor((-currentPanX / currentZoom) / gridSize) * gridSize - gridSize;
+      const endGridX = startGridX + (canvas.width / currentZoom) + gridSize * 2;
+      const startGridY = Math.floor((-currentPanY / currentZoom) / gridSize) * gridSize - gridSize;
+      const endGridY = startGridY + (canvas.height / currentZoom) + gridSize * 2;
+
+      for (let x = startGridX; x < endGridX; x += gridSize) {
         ctx.beginPath();
-        ctx.moveTo(x, -pan.y);
-        ctx.lineTo(x, canvas.height / zoom - pan.y);
+        ctx.moveTo(x, startGridY);
+        ctx.lineTo(x, endGridY);
         ctx.stroke();
       }
-      for (let y = -pan.y; y < canvas.height / zoom - pan.y; y += gridSize) {
+      for (let y = startGridY; y < endGridY; y += gridSize) {
         ctx.beginPath();
-        ctx.moveTo(-pan.x, y);
-        ctx.lineTo(canvas.width / zoom - pan.x, y);
+        ctx.moveTo(startGridX, y);
+        ctx.lineTo(endGridX, y);
         ctx.stroke();
       }
 
-      // Update Layout
-      updateLayout(canvas.width / zoom, canvas.height / zoom);
+      // Update Layout coordinates (runs layouts incrementally)
+      updateLayout(canvas.width, canvas.height);
+
+      // --- Compute Active Variables and Focus ---
+      const activeVarNames = new Set<string>();
+      const activeHeapIds = new Set<string>();
+      const activeFrameIds = new Set<string>();
+
+      const step = steps[currentStepIndex];
+      if (step) {
+        // Current stack top-most frame is active
+        if (step.callStack.length > 0) {
+          const topFrame = step.callStack[step.callStack.length - 1];
+          activeFrameIds.add(`frame_${topFrame.functionName}_${step.callStack.length - 1}`);
+        }
+
+        // Compare values with previous step to see what changed
+        const prevStep = currentStepIndex > 0 ? steps[currentStepIndex - 1] : null;
+        if (prevStep) {
+          step.variables.forEach(v => {
+            const prevV = prevStep.variables.find(pv => pv.name === v.name && pv.scope === v.scope);
+            if (!prevV || prevV.value !== v.value || prevV.referencedId !== v.referencedId) {
+              activeVarNames.add(v.name);
+              if (v.referencedId) {
+                activeHeapIds.add(v.referencedId);
+              }
+            }
+          });
+          step.heap.forEach(h => {
+            const prevH = prevStep.heap.find(ph => ph.id === h.id);
+            if (!prevH || JSON.stringify(prevH.value) !== JSON.stringify(h.value)) {
+              activeHeapIds.add(h.id);
+            }
+          });
+        }
+
+        // Fallback: match variables mentioned in step description
+        if (activeVarNames.size === 0 && activeHeapIds.size === 0) {
+          step.variables.forEach(v => {
+            const regex = new RegExp(`\\b${v.name}\\b`);
+            if (regex.test(step.description)) {
+              activeVarNames.add(v.name);
+              if (v.referencedId) {
+                activeHeapIds.add(v.referencedId);
+              }
+            }
+          });
+        }
+      }
 
       // --- Draw Nodes ---
       const nodes = Array.from(nodesRef.current.values());
-
-      // Separate nodes by type
       const varNodes = nodes.filter(n => n.type === 'variable');
       const frameNodes = nodes.filter(n => n.type === 'frame');
       const heapNodes = nodes.filter(n => n.type === 'heap');
 
-      // 1. Draw Global & Local Variable Panels Headers
+      const activeFrameName = step?.callStack[step.callStack.length - 1]?.functionName || 'local';
+
+      // 1. Column headers
       ctx.font = 'bold 11px Inter';
-      ctx.fillStyle = '#94A3B8';
-      if (varNodes.some(n => (n.data as Variable).scope === 'global')) {
-        ctx.fillText('GLOBAL VARIABLES', 50, 40);
-      }
-      if (varNodes.some(n => (n.data as Variable).scope === 'local' || (n.data as Variable).scope === 'parameter')) {
-        ctx.fillText('STACK FRAME LOCALS', 320, 40);
-      }
-      if (frameNodes.length > 0) {
-        ctx.fillText('CALL STACK', 600, 40);
-      }
-      if (heapNodes.length > 0) {
-        ctx.fillText('MEMORY HEAP (DYNAMIC)', 80, canvas.height / zoom - 210);
+      ctx.fillStyle = '#64748B'; // slate-500
+      ctx.letterSpacing = '1px';
+
+      if (varNodes.length > 0) {
+        const hasGlobals = varNodes.some(n => (n.data as Variable).scope === 'global');
+        const hasLocals = varNodes.some(n => (n.data as Variable).scope !== 'global');
+        if (hasGlobals) {
+          ctx.fillText('GLOBAL VARIABLES', 50, 68);
+        }
+        if (hasLocals) {
+          // Identify height dynamic offset for globals
+          const globalsHeight = varNodes
+            .filter(n => (n.data as Variable).scope === 'global')
+            .reduce((acc, n) => acc + n.height + 15, 80);
+          ctx.fillText(`LOCAL VARIABLES (${activeFrameName})`, 50, globalsHeight + 13);
+        }
       }
 
-      // 2. Draw Variable Cards
+      if (heapNodes.length > 0) {
+        // Center header above heap column
+        const headerX = varX + leftColWidth + ((stackX - (varX + leftColWidth)) - heapColWidth) / 2;
+        ctx.fillText('DYNAMIC MEMORY (HEAP)', headerX, 68);
+      }
+
+      if (frameNodes.length > 0) {
+        ctx.fillText('CALL STACK', stackX, 68);
+      }
+      ctx.letterSpacing = '0px'; // reset
+
+      // Utility function to draw a modern card
+      const drawCard = (
+        n: RenderNode,
+        theme: { bg: string; border: string; glow: string; accent: string },
+        isFocused: boolean
+      ) => {
+        const x = n.x.current;
+        const y = n.y.current;
+        const w = n.width;
+        const h = n.height;
+
+        ctx.save();
+        
+        // Dim opacity slightly for out-of-focus elements
+        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
+        let opacityTarget = n.opacity.current;
+        if (hasActiveFocus && !isFocused) {
+          opacityTarget *= 0.55; // Dim out-of-focus elements
+        }
+        ctx.globalAlpha = opacityTarget;
+
+        // Draw shadow glow for focused elements
+        if (isFocused) {
+          ctx.shadowColor = theme.glow;
+          ctx.shadowBlur = 15;
+          ctx.strokeStyle = theme.border;
+          ctx.lineWidth = 2.5;
+        } else {
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+          ctx.lineWidth = 1.2;
+        }
+
+        // Draw glassmorphism background
+        ctx.fillStyle = n.type === 'frame' ? 'rgba(15, 23, 42, 0.75)' : theme.bg;
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        // Draw a clean accent colored bar on the left
+        ctx.fillStyle = theme.accent;
+        ctx.beginPath();
+        ctx.roundRect(x + 1, y + 6, 4, h - 12, 2);
+        ctx.fill();
+
+        ctx.restore();
+      };
+
+      // 2. Draw Variable Cards (Left)
       varNodes.forEach(node => {
         const v = node.data as Variable;
         const x = node.x.current;
         const y = node.y.current;
 
-        // Glassmorphism card drawing
-        ctx.fillStyle = '#1E293B';
-        ctx.strokeStyle = '#334155';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.roundRect(x, y, node.width, node.height, 8);
-        ctx.fill();
-        ctx.stroke();
-
-        // Left color stripe
-        ctx.fillStyle = v.scope === 'parameter' ? '#F59E0B' : '#3B82F6';
-        ctx.beginPath();
-        ctx.roundRect(x, y, 4, node.height, [8, 0, 0, 8]);
-        ctx.fill();
-
-        // Label name
-        ctx.fillStyle = '#F8FAFC';
-        ctx.font = 'semibold 13px Inter';
-        ctx.fillText(node.label, x + 15, y + 22);
-
-        // Type label
-        ctx.fillStyle = '#64748B';
-        ctx.font = 'bold 9px Inter';
-        ctx.fillText(v.type.toUpperCase(), x + 15, y + 36);
-
-        // Draw Value or Array Box
-        if (v.type.includes('[]') || v.type === 'array') {
-          // It's an array reference (points to heap object)
-          // Draw small indexing boxes
-          const arrayRef = v.value; // e.g. "0x1000"
-          ctx.fillStyle = '#10B981';
-          ctx.font = '12px JetBrains Mono';
-          ctx.fillText(`ptr -> ${arrayRef || 'NULL'}`, x + node.width - 100, y + 26);
-        } else {
-          // Standard value
-          ctx.fillStyle = '#E2E8F0';
-          ctx.font = '500 13px JetBrains Mono';
-          const valString = v.value === null ? 'null' : (typeof v.value === 'object' ? '{...}' : String(v.value));
-          ctx.fillText(valString, x + node.width - 90, y + 26);
+        const isFocused = activeVarNames.has(v.name);
+        const hoveredNode = hoveredNodeIdRef.current ? nodesRef.current.get(hoveredNodeIdRef.current) : null;
+        
+        let isHoverHighlight = false;
+        if (hoveredNode) {
+          if (hoveredNode.id === node.id) {
+            isHoverHighlight = true;
+          } else if (hoveredNode.type === 'heap' && v.isReference && v.referencedId === (hoveredNode.data as HeapObject).id) {
+            isHoverHighlight = true;
+          }
         }
+
+        const isSelected = !!(selectedItem && selectedItem.type === 'variable' && selectedItem.name === v.name);
+        const theme = getTypeTheme(v.type, v.value);
+        
+        // Highlight in orange when selected
+        const cardTheme = isSelected ? {
+          ...theme,
+          border: '#F59E0B',
+          glow: 'rgba(245, 158, 11, 0.7)'
+        } : theme;
+
+        drawCard(node, cardTheme, isFocused || isHoverHighlight || isSelected);
+
+        ctx.save();
+        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
+        ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+
+        // Variable Name
+        ctx.fillStyle = '#F8FAFC';
+        ctx.font = 'bold 13px Inter';
+        ctx.fillText(node.label, x + 16, y + 26);
+
+        // Variable Type
+        ctx.fillStyle = theme.accent;
+        ctx.font = 'bold 9px Inter';
+        ctx.fillText(theme.name.toUpperCase(), x + 16, y + 40);
+
+        // Draw values (with old->new value change transitions)
+        if (v.isReference && v.referencedId) {
+          // Pointer value (Cyan or Green)
+          ctx.fillStyle = '#22D3EE';
+          ctx.font = 'bold 13px JetBrains Mono';
+          ctx.fillText(`&${v.referencedId}`, x + node.width - 90, y + 36);
+        } else {
+          const valString = v.value === null ? 'null' : (typeof v.value === 'object' ? '{...}' : String(v.value));
+          const textX = x + node.width - 20;
+          const textY = y + 38;
+          ctx.font = 'bold 14px JetBrains Mono';
+          ctx.textAlign = 'right';
+
+          const inTransition = node.valueChangeTime && (Date.now() - node.valueChangeTime < 1200);
+          if (inTransition && node.prevValue !== undefined && node.prevValue !== valString) {
+            const elapsed = Date.now() - node.valueChangeTime!;
+            const progress = Math.min(elapsed / 1200, 1);
+            
+            const prevText = node.prevValue;
+            const arrow = ' → ';
+            const nextText = valString;
+            
+            ctx.font = 'bold 13px JetBrains Mono';
+            const prevW = ctx.measureText(prevText).width;
+            const arrowW = ctx.measureText(arrow).width;
+            const nextW = ctx.measureText(nextText).width;
+            const totalW = prevW + arrowW + nextW;
+            
+            const drawX = textX - totalW;
+
+            // Previous value fading out
+            ctx.fillStyle = '#EF4444';
+            ctx.globalAlpha = node.opacity.current * (1 - progress * 0.5) * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+            ctx.fillText(prevText, drawX + prevW, textY);
+
+            // Arrow
+            ctx.fillStyle = '#94A3B8';
+            ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+            ctx.fillText(arrow, drawX + prevW + arrowW, textY);
+
+            // New value fading in
+            ctx.fillStyle = '#10B981';
+            ctx.globalAlpha = node.opacity.current * (0.5 + progress * 0.5) * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+            ctx.fillText(nextText, drawX + prevW + arrowW + nextW, textY);
+          } else {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(valString, textX, textY);
+          }
+          ctx.textAlign = 'left';
+        }
+        ctx.restore();
       });
 
-      // 3. Draw Call Stack Frames
+      // 3. Draw Call Stack Frames (Right)
       frameNodes.forEach((node, index) => {
         const x = node.x.current;
         const y = node.y.current;
-        const isActive = index === frameNodes.length - 1;
-
-        ctx.fillStyle = isActive ? '#1E293B' : '#0F172A';
-        ctx.strokeStyle = isActive ? '#3B82F6' : '#334155';
-        ctx.lineWidth = isActive ? 2 : 1;
+        const isActive = index === frameNodes.length - 1; // Top frame is active
         
-        ctx.beginPath();
-        ctx.roundRect(x, y, node.width, node.height, 8);
-        ctx.fill();
-        ctx.stroke();
+        const isSelected = !!(selectedItem && selectedItem.type === 'frame' && selectedItem.name === node.label);
 
-        // Glow effect for active frame
-        if (isActive) {
-          ctx.shadowColor = 'rgba(59, 130, 246, 0.4)';
-          ctx.shadowBlur = 10;
-          ctx.beginPath();
-          ctx.roundRect(x, y, node.width, node.height, 8);
-          ctx.stroke();
-          ctx.shadowBlur = 0; // reset
-        }
+        const theme = {
+          bg: 'rgba(30, 41, 59, 0.4)',
+          border: isSelected ? '#F59E0B' : '#3B82F6',
+          glow: isSelected ? 'rgba(245, 158, 11, 0.7)' : 'rgba(59, 130, 246, 0.4)',
+          accent: isSelected ? '#F59E0B' : (isActive ? '#F59E0B' : '#64748B')
+        };
 
-        ctx.fillStyle = isActive ? '#F8FAFC' : '#94A3B8';
+        drawCard(node, theme, isActive || isSelected);
+
+        ctx.save();
+        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
+        ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isActive && !isSelected ? 0.55 : 1);
+
+        ctx.fillStyle = isActive || isSelected ? '#F8FAFC' : '#94A3B8';
         ctx.font = 'bold 13px Inter';
-        ctx.fillText(node.label, x + 15, y + 25);
+        ctx.fillText(node.label, x + 16, y + 26);
 
         ctx.fillStyle = '#64748B';
-        ctx.font = '11px Inter';
-        ctx.fillText(`Line ${(node.data as StackFrame).line}`, x + 15, y + 42);
+        ctx.font = 'bold 9px Inter';
+        ctx.fillText(`ACTIVE LINE ${ (node.data as StackFrame).line }`, x + 16, y + 42);
+
+        ctx.restore();
       });
 
-      // 4. Draw Heap Cards
+      // 4. Draw Heap Cards (Center)
       heapNodes.forEach(node => {
         const x = node.x.current;
         const y = node.y.current;
         const obj = node.data as HeapObject;
 
-        ctx.fillStyle = '#0B1329';
-        ctx.strokeStyle = '#10B981';
-        ctx.lineWidth = 1.5;
+        const isFocused = activeHeapIds.has(obj.id);
+        const hoveredNode = hoveredNodeIdRef.current ? nodesRef.current.get(hoveredNodeIdRef.current) : null;
         
-        ctx.beginPath();
-        ctx.roundRect(x, y, node.width, node.height, 8);
-        ctx.fill();
-        ctx.stroke();
+        let isHoverHighlight = false;
+        if (hoveredNode) {
+          if (hoveredNode.id === node.id) {
+            isHoverHighlight = true;
+          } else if (hoveredNode.type === 'variable' && (hoveredNode.data as Variable).referencedId === obj.id) {
+            isHoverHighlight = true;
+          }
+        }
 
-        // Hex Address
-        ctx.fillStyle = '#10B981';
-        ctx.font = 'bold 10px JetBrains Mono';
-        ctx.fillText(node.label, x + 12, y + 20);
+        const isSelected = !!(selectedItem && (
+          (selectedItem.type === 'variable' && selectedItem.name === obj.id) ||
+          (selectedItem.type === 'array_element' && selectedItem.name.startsWith(obj.id))
+        ));
 
-        // Class type
+        const theme = getTypeTheme(obj.type, obj.value);
+        
+        // Highlight in orange when selected
+        const cardTheme = isSelected ? {
+          ...theme,
+          border: '#F59E0B',
+          glow: 'rgba(245, 158, 11, 0.7)'
+        } : theme;
+
+        drawCard(node, cardTheme, isFocused || isHoverHighlight || isSelected);
+
+        ctx.save();
+        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
+        ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+
+        // Hex Address/ID
+        ctx.fillStyle = theme.accent;
+        ctx.font = 'bold 11px JetBrains Mono';
+        ctx.fillText(`@${obj.id}`, x + 16, y + 24);
+
+        // Object Class Type
         ctx.fillStyle = '#64748B';
-        ctx.font = '9px Inter';
-        ctx.fillText(node.subLabel?.toUpperCase() || 'OBJECT', x + 12, y + 32);
+        ctx.font = 'bold 8px Inter';
+        ctx.fillText(obj.type.toUpperCase(), x + 16, y + 36);
 
-        // If it's an array type, render slot grid
+        // Render slots if array
         if (Array.isArray(obj.value)) {
-          const slotWidth = 32;
-          const slotHeight = 30;
+          const slotWidth = 36;
+          const slotHeight = 32;
           const slotY = y + 50;
-          
-          (obj.value as unknown[]).slice(0, 5).forEach((val: unknown, idx: number) => {
-            const slotX = x + 12 + idx * (slotWidth + 4);
+          const maxSlots = 6;
+          const itemsToRender = (obj.value as unknown[]).slice(0, maxSlots);
+          const hasMore = (obj.value as unknown[]).length > maxSlots;
+
+          itemsToRender.forEach((val: unknown, idx: number) => {
+            const slotX = x + 16 + idx * (slotWidth + 6);
             
+            // Check if this specific slot is selected in state
+            const isSlotSelected = selectedItem && 
+              selectedItem.type === 'array_element' && 
+              selectedItem.name === `${obj.id}[${idx}]`;
+
             // Draw box slot
-            ctx.fillStyle = '#1E293B';
-            ctx.strokeStyle = '#334155';
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.6)';
+            ctx.strokeStyle = isSlotSelected ? '#F59E0B' : 'rgba(255, 255, 255, 0.08)';
+            ctx.lineWidth = isSlotSelected ? 2 : 1;
             ctx.beginPath();
-            ctx.roundRect(slotX, slotY, slotWidth, slotHeight, 4);
+            ctx.roundRect(slotX, slotY, slotWidth, slotHeight, 6);
             ctx.fill();
             ctx.stroke();
 
-            // Index number below
-            ctx.fillStyle = '#475569';
-            ctx.font = '9px JetBrains Mono';
-            ctx.fillText(`[${idx}]`, slotX + 8, slotY + slotHeight + 12);
+            // Flash transition check
+            const flash = node.slotFlashes?.[idx];
+            const flashProgress = flash ? (Date.now() - flash.changeTime) / 800 : 1;
+            if (flashProgress < 1) {
+              ctx.save();
+              ctx.fillStyle = `rgba(16, 185, 129, ${0.35 * (1 - flashProgress)})`;
+              ctx.beginPath();
+              ctx.roundRect(slotX, slotY, slotWidth, slotHeight, 6);
+              ctx.fill();
+              ctx.restore();
+            }
 
-            // Value inside slot
-            ctx.fillStyle = '#10B981';
-            ctx.font = 'bold 11px JetBrains Mono';
-            ctx.fillText(val === null ? 'n' : String(val), slotX + 10, slotY + 18);
+            // Index labels
+            ctx.fillStyle = isSlotSelected ? '#F59E0B' : '#475569';
+            ctx.font = 'bold 9px JetBrains Mono';
+            ctx.fillText(`[${idx}]`, slotX + slotWidth / 2 - 8, slotY + slotHeight + 13);
+
+            // Value inside slot with transition
+            const textX = slotX + slotWidth / 2;
+            const textY = slotY + slotHeight / 2 + 4;
+            ctx.font = 'bold 12px JetBrains Mono';
+            ctx.textAlign = 'center';
+
+            const valStr = val === null ? 'null' : String(val);
+
+            if (flashProgress < 1 && flash && flash.oldValue !== valStr) {
+              ctx.save();
+              ctx.fillStyle = '#EF4444';
+              ctx.globalAlpha = node.opacity.current * (1 - flashProgress) * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+              ctx.fillText(flash.oldValue, textX, textY - 6);
+              ctx.restore();
+
+              ctx.save();
+              ctx.fillStyle = '#10B981';
+              ctx.globalAlpha = node.opacity.current * flashProgress * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+              ctx.fillText(valStr, textX, textY + 6);
+              ctx.restore();
+            } else {
+              ctx.fillStyle = '#FFFFFF';
+              ctx.fillText(valStr, textX, textY);
+            }
+            ctx.textAlign = 'left';
           });
+
+          if (hasMore) {
+            const slotX = x + 16 + maxSlots * (slotWidth + 6);
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.3)';
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.beginPath();
+            ctx.roundRect(slotX, slotY, slotWidth, slotHeight, 6);
+            ctx.fill();
+            ctx.stroke();
+            
+            ctx.fillStyle = '#64748B';
+            ctx.font = 'bold 12px JetBrains Mono';
+            ctx.fillText('...', slotX + slotWidth / 2 - 8, slotY + slotHeight / 2 + 4);
+          }
         } else if (obj.value && typeof obj.value === 'object') {
-          // Object key-value pairs
-          ctx.fillStyle = '#E2E8F0';
-          ctx.font = '11px JetBrains Mono';
-          let fieldY = y + 50;
+          // Struct/Object key-value properties
+          ctx.font = '12px JetBrains Mono';
+          let fieldY = y + 54;
           const valObj = obj.value as Record<string, unknown>;
           Object.keys(valObj).forEach((key) => {
-            ctx.fillText(`${key}: ${valObj[key]}`, x + 12, fieldY);
-            fieldY += 16;
+            ctx.fillStyle = theme.accent;
+            ctx.fillText(`${key}:`, x + 18, fieldY);
+
+            ctx.fillStyle = '#FFFFFF';
+            const valStr = valObj[key] === null ? 'null' : String(valObj[key]);
+            ctx.fillText(` ${valStr}`, x + 18 + ctx.measureText(`${key}:`).width, fieldY);
+            fieldY += 20;
           });
         }
+        ctx.restore();
       });
 
-      // 5. Draw Pointer Arrows
+      // 5. Draw Pointer Reference Arrows
+      // Pointers flow horizontally from variables on the left, curving beautifully into the center heap
       ctx.shadowBlur = 0;
       varNodes.forEach(node => {
         const v = node.data as Variable;
         if (v.isReference && v.referencedId) {
-          // Find target node coordinates
           const targetNode = nodes.find(n => n.label === v.referencedId || n.id === `heap_${v.referencedId}`);
           
           if (targetNode) {
-            const startX = node.x.current + node.width - 20;
-            const startY = node.y.current + 22;
-            const endX = targetNode.x.current + 20;
-            const endY = targetNode.y.current + 25;
+            ctx.save();
+            const isFocused = activeVarNames.has(v.name) || activeHeapIds.has(v.referencedId);
+            
+            const hoveredNode = hoveredNodeIdRef.current ? nodesRef.current.get(hoveredNodeIdRef.current) : null;
+            let isHoverHighlight = false;
+            if (hoveredNode) {
+              if (hoveredNode.id === node.id || hoveredNode.id === targetNode.id) {
+                isHoverHighlight = true;
+              }
+            }
 
-            // Draw line
-            ctx.strokeStyle = '#10B981';
-            ctx.lineWidth = 2;
+            // Check if pointer source or target is selected
+            const isSelected = selectedItem && (
+              (selectedItem.type === 'variable' && selectedItem.name === v.name) ||
+              (selectedItem.type === 'variable' && selectedItem.name === targetNode.label) ||
+              (selectedItem.type === 'array_element' && selectedItem.name.startsWith(targetNode.label))
+            );
+
+            const activeHighlight = isFocused || isHoverHighlight || isSelected;
+            ctx.globalAlpha = Math.min(node.opacity.current, targetNode.opacity.current) * (activeVarNames.size > 0 && !activeHighlight ? 0.35 : 1);
+
+            const startX = node.x.current + node.width - 8;
+            const startY = node.y.current + node.height / 2;
+            const endX = targetNode.x.current + 8;
+            const endY = targetNode.y.current + 25; // Arrow targets top heading of heap cell
+
+            ctx.strokeStyle = activeHighlight ? '#F59E0B' : '#10B981'; // Orange if selected/active, emerald green otherwise
+            ctx.lineWidth = activeHighlight ? 2.5 : 1.5;
+
+            // Draw a smooth bezier horizontal S-curve
             ctx.beginPath();
             ctx.moveTo(startX, startY);
             
-            // Quadratic curve
-            const cpX = (startX + endX) / 2;
-            const cpY = (startY + endY) / 2 - 40;
-            ctx.quadraticCurveTo(cpX, cpY, endX, endY);
+            const cp1X = startX + (endX - startX) * 0.45;
+            const cp1Y = startY;
+            const cp2X = startX + (endX - startX) * 0.55;
+            const cp2Y = endY;
+
+            ctx.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, endX, endY);
             ctx.stroke();
 
             // Arrow head
-            const angle = Math.atan2(endY - cpY, endX - cpX);
-            ctx.fillStyle = '#10B981';
+            const angle = Math.atan2(endY - cp2Y, endX - cp2X);
+            ctx.fillStyle = activeHighlight ? '#F59E0B' : '#10B981';
             ctx.beginPath();
             ctx.moveTo(endX, endY);
-            ctx.lineTo(endX - 10 * Math.cos(angle - Math.PI / 6), endY - 10 * Math.sin(angle - Math.PI / 6));
-            ctx.lineTo(endX - 10 * Math.cos(angle + Math.PI / 6), endY - 10 * Math.sin(angle + Math.PI / 6));
+            ctx.lineTo(endX - 8 * Math.cos(angle - Math.PI / 6), endY - 8 * Math.sin(angle - Math.PI / 6));
+            ctx.lineTo(endX - 8 * Math.cos(angle + Math.PI / 6), endY - 8 * Math.sin(angle + Math.PI / 6));
             ctx.closePath();
             ctx.fill();
+
+            ctx.restore();
           }
         }
       });
@@ -479,38 +1088,175 @@ export default function VisualizerCanvas() {
         cancelAnimationFrame(animationFrameIdRef.current);
       }
     };
-  }, [currentStepIndex, steps, zoom, pan, updateLayout]);
+  }, [currentStepIndex, steps, updateLayout, selectedItem]);
 
   // Zoom Handler
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     const zoomFactor = 1.1;
-    let newZoom = zoom;
+    let newZoom = zoomSpringRef.current.target;
     if (e.deltaY < 0) {
-      newZoom = Math.min(zoom * zoomFactor, 2.0);
+      newZoom = Math.min(newZoom * zoomFactor, 2.0);
     } else {
-      newZoom = Math.max(zoom / zoomFactor, 0.5);
+      newZoom = Math.max(newZoom / zoomFactor, 0.5);
     }
-    setZoom(newZoom);
+    
+    // Zoom centered around cursor
+    zoomSpringRef.current.target = newZoom;
+    setAutoFit(false); // Disable auto-fit on manual scroll
   };
 
   // Pan Handlers
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (awaitingInput) return; // Disable pan/zoom interaction when inputting
+    if (awaitingInput) return;
     isDraggingRef.current = true;
-    dragStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+    clickPosRef.current = { x: e.clientX, y: e.clientY };
+
+    dragStartRef.current = { 
+      x: e.clientX - panXSpringRef.current.target, 
+      y: e.clientY - panYSpringRef.current.target 
+    };
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDraggingRef.current) return;
-    setPan({
-      x: e.clientX - dragStartRef.current.x,
-      y: e.clientY - dragStartRef.current.y
-    });
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    if (isDraggingRef.current) {
+      const newPanX = e.clientX - dragStartRef.current.x;
+      const newPanY = e.clientY - dragStartRef.current.y;
+      
+      panXSpringRef.current.target = newPanX;
+      panYSpringRef.current.target = newPanY;
+      
+      // Stop tracking automatically on drag
+      setAutoFit(false);
+      return;
+    }
+
+    // Convert mouse event client coordinates to canvas world coordinates for hover highlights
+    const rect = canvas.getBoundingClientRect();
+    const currentZoom = zoomSpringRef.current.current;
+    const currentPanX = panXSpringRef.current.current;
+    const currentPanY = panYSpringRef.current.current;
+
+    const mouseX = (e.clientX - rect.left - currentPanX) / currentZoom;
+    const mouseY = (e.clientY - rect.top - currentPanY) / currentZoom;
+
+    let foundHovered: string | null = null;
+    for (const [id, node] of nodesRef.current) {
+      if (node.isRemoving) continue;
+      if (
+        mouseX >= node.x.current &&
+        mouseX <= node.x.current + node.width &&
+        mouseY >= node.y.current &&
+        mouseY <= node.y.current + node.height
+      ) {
+        foundHovered = id;
+        break;
+      }
+    }
+    
+    if (hoveredNodeIdRef.current !== foundHovered) {
+      hoveredNodeIdRef.current = foundHovered;
+    }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e: React.MouseEvent) => {
     isDraggingRef.current = false;
+    // Check if it was a quick click rather than a pan drag
+    const dragDist = Math.hypot(e.clientX - clickPosRef.current.x, e.clientY - clickPosRef.current.y);
+    if (dragDist < 5) {
+      handleCanvasClick(e);
+    }
+  };
+
+  // Canvas Click Handler (Selects Variables, Frame, or Array element slots)
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const currentZoom = zoomSpringRef.current.current;
+    const currentPanX = panXSpringRef.current.current;
+    const currentPanY = panYSpringRef.current.current;
+
+    const clickX = (e.clientX - rect.left - currentPanX) / currentZoom;
+    const clickY = (e.clientY - rect.top - currentPanY) / currentZoom;
+
+    let clickedNode: RenderNode | null = null;
+    const nodes = Array.from(nodesRef.current.values());
+    for (const node of nodes) {
+      if (node.isRemoving) continue;
+      if (
+        clickX >= node.x.current &&
+        clickX <= node.x.current + node.width &&
+        clickY >= node.y.current &&
+        clickY <= node.y.current + node.height
+      ) {
+        clickedNode = node;
+        break;
+      }
+    }
+
+    if (clickedNode) {
+      if (clickedNode.type === 'variable') {
+        const v = clickedNode.data as Variable;
+        setSelectedItem({
+          name: v.name,
+          type: 'variable',
+          details: `type: ${v.type}, value: ${v.value}`
+        });
+      } else if (clickedNode.type === 'frame') {
+        const frame = clickedNode.data as StackFrame;
+        setSelectedItem({
+          name: frame.functionName,
+          type: 'frame',
+          details: `line: ${frame.line}`
+        });
+      } else if (clickedNode.type === 'heap') {
+        const obj = clickedNode.data as HeapObject;
+        
+        // Check if an array slot was clicked
+        if (Array.isArray(obj.value)) {
+          const slotWidth = 36;
+          const slotHeight = 32;
+          const slotY = clickedNode.y.current + 50;
+          let clickedSlotIdx = -1;
+
+          obj.value.slice(0, 6).forEach((val, idx) => {
+            const slotX = clickedNode!.x.current + 16 + idx * (slotWidth + 6);
+            if (
+              clickX >= slotX &&
+              clickX <= slotX + slotWidth &&
+              clickY >= slotY &&
+              clickY <= slotY + slotHeight
+            ) {
+              clickedSlotIdx = idx;
+            }
+          });
+
+          if (clickedSlotIdx !== -1) {
+            setSelectedItem({
+              name: `${obj.id}[${clickedSlotIdx}]`,
+              type: 'array_element',
+              details: `value: ${obj.value[clickedSlotIdx]}`
+            });
+            return;
+          }
+        }
+
+        // Default: dynamic object structure selection
+        setSelectedItem({
+          name: obj.id,
+          type: 'variable',
+          details: `type: ${obj.type}`
+        });
+      }
+    } else {
+      // Clicked in empty space -> Clear active context selection
+      setSelectedItem(null);
+    }
   };
 
   const handleInputSubmit = (e: React.FormEvent) => {
@@ -521,10 +1267,20 @@ export default function VisualizerCanvas() {
     }
   };
 
+  const resetView = () => {
+    zoomSpringRef.current.target = 1;
+    panXSpringRef.current.target = 0;
+    panYSpringRef.current.target = 0;
+    setAutoFit(false);
+  };
+
+  // Recent changes
+  const recentChanges = getMemoryHistory(steps, currentStepIndex);
+
   return (
     <div 
       ref={containerRef}
-      className="flex-1 min-h-[400px] bg-[#0F172A] border border-slate-700/60 rounded-xl overflow-hidden shadow-2xl relative select-none"
+      className="flex-1 min-h-[460px] bg-[#080C14] border border-slate-800/80 rounded-xl overflow-hidden shadow-2xl relative select-none"
     >
       {/* Canvas Element */}
       <canvas
@@ -537,39 +1293,101 @@ export default function VisualizerCanvas() {
         className="block cursor-grab active:cursor-grabbing w-full h-full"
       />
 
-      {/* Floating Canvas UI Controls */}
-      <div className="absolute top-4 right-4 flex items-center space-x-2 bg-slate-900/80 border border-slate-800 rounded-lg p-1.5 backdrop-blur-md">
+      {/* Floating Canvas UI Controls: Auto-Fit Toggle & Zoom Status */}
+      <div className="absolute top-4 left-4 flex items-center space-x-2.5 z-20">
+        {/* Auto Fit toggle */}
+        <div className="flex items-center space-x-2 bg-slate-950/85 border border-slate-800/60 rounded-full px-3 py-1.5 backdrop-blur-md shadow-lg">
+          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+            Auto-Fit
+          </span>
+          <button
+            onClick={() => setAutoFit(!autoFit)}
+            className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+              autoFit ? 'bg-blue-600' : 'bg-slate-700'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
+                autoFit ? 'translate-x-3.5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Top Center: Floating Compressed "Current Action" Banner */}
+      {steps.length > 0 && currentStepIndex < steps.length && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center bg-slate-950/90 border border-slate-800/80 rounded-full px-5 py-2 z-20 backdrop-blur-md shadow-2xl animate-scale-up border-b-blue-500/40">
+          <p className="text-xs font-bold text-slate-100 font-mono tracking-wider">
+            L{steps[currentStepIndex].lineNumber} &bull; {steps[currentStepIndex].operation.replace('_', ' ').toUpperCase()}
+          </p>
+        </div>
+      )}
+
+      {/* Top Right: Reset and Zoom Controls */}
+      <div className="absolute top-4 right-4 flex items-center space-x-2 bg-slate-950/85 border border-slate-800/60 rounded-full p-1.5 z-20 backdrop-blur-md shadow-lg">
         <button 
-          onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-          className="px-2 py-1 text-[10px] font-bold text-slate-400 hover:text-slate-200 uppercase tracking-wider transition-colors cursor-pointer"
+          onClick={resetView}
+          title="Reset Camera"
+          className="p-1 text-slate-400 hover:text-slate-200 transition-colors cursor-pointer rounded-full hover:bg-slate-800/60"
         >
-          Reset View
+          <RotateCcw size={13} />
         </button>
-        <span className="text-[10px] text-slate-500 font-mono select-none px-1">
-          {Math.round(zoom * 100)}%
+        <span 
+          ref={zoomSpanRef}
+          className="text-[10px] text-slate-400 font-mono select-none px-1.5 border-l border-slate-800"
+        >
+          100%
         </span>
       </div>
+
+      {/* Bottom Left: Memory Timeline Overlay */}
+      {recentChanges.length > 0 && (
+        <div className="absolute bottom-4 left-4 flex flex-col space-y-2 bg-slate-950/90 border border-slate-800/70 rounded-xl p-3.5 z-20 backdrop-blur-md shadow-2xl w-60 animate-slide-up border-l-emerald-500/40">
+          <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-800/80 pb-1.5">
+            Memory History
+          </h4>
+          <div className="flex flex-col space-y-2 pt-1 font-mono text-xs">
+            {recentChanges.map((change, idx) => (
+              <div key={idx} className="flex flex-col space-y-1 bg-slate-900/40 p-2 rounded-lg border border-slate-800/40">
+                <div className="flex justify-between items-center text-[9px] text-slate-500">
+                  <span>Line {change.line}</span>
+                  <span className="text-[8px] uppercase tracking-wide bg-emerald-500/10 text-emerald-400 px-1 py-0.5 rounded font-sans font-bold border border-emerald-500/10">
+                    Write
+                  </span>
+                </div>
+                <div className="flex items-center space-x-1.5 flex-wrap">
+                  <span className="font-bold text-slate-200">{change.name}</span>
+                  <span className="text-red-400 line-through text-[11px]">{change.oldValue}</span>
+                  <span className="text-slate-500">→</span>
+                  <span className="text-emerald-400 font-bold">{change.newValue}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Interactive Input Overlay (dim background, slide-up modal) */}
       {awaitingInput && (
         <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-6 z-30 animate-fade-in">
           <form 
             onSubmit={handleInputSubmit}
-            className="w-full max-w-md bg-slate-900 border border-blue-500/40 rounded-xl p-6 shadow-2xl shadow-blue-500/10 flex flex-col space-y-4 animate-scale-up"
+            className="w-full max-w-sm bg-slate-900 border border-blue-500/35 rounded-xl p-5 shadow-2xl shadow-blue-500/10 flex flex-col space-y-4 animate-scale-up"
           >
             <div className="flex items-center space-x-3 text-blue-400">
-              <Keyboard size={22} className="animate-pulse" />
-              <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-200">
+              <Keyboard size={20} className="animate-pulse" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
                 Awaiting Input
               </h3>
             </div>
             
-            <p className="text-sm text-slate-300 font-medium font-mono leading-relaxed bg-slate-950/50 p-3 rounded-lg border border-slate-800">
+            <p className="text-xs text-slate-300 font-medium font-mono leading-relaxed bg-slate-950/60 p-3 rounded-lg border border-slate-800">
               {awaitingInput.promptMessage}
             </p>
 
             <div className="flex flex-col space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+              <label className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">
                 Value ({awaitingInput.expectedType})
               </label>
               <input
@@ -577,8 +1395,8 @@ export default function VisualizerCanvas() {
                 step={awaitingInput.expectedType === 'float' ? 'any' : '1'}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
-                placeholder={`Enter your ${awaitingInput.expectedType} value...`}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+                placeholder={`Enter ${awaitingInput.expectedType}...`}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition-colors font-mono"
                 autoFocus
                 required
               />
@@ -586,7 +1404,7 @@ export default function VisualizerCanvas() {
 
             <button
               type="submit"
-              className="w-full bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-sm py-2 rounded-lg transition-all duration-200 cursor-pointer shadow-lg shadow-blue-900/35"
+              className="w-full bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs py-2 rounded-lg transition-all duration-200 cursor-pointer shadow-lg shadow-blue-900/35"
             >
               Submit Input
             </button>

@@ -26,6 +26,12 @@ interface CodeFlowState {
   executionError: ExecutionError | null;
   theme: 'light' | 'dark';
 
+  // AI Preloaded Explanations
+  explanations: Record<number, string>;
+  explanationsLoading: boolean;
+  explanationsError: string | null;
+  fetchBatchExplanations: () => Promise<void>;
+
   // Actions
   toggleBreakpoint: (line: number) => void;
   setSpeed: (speed: number) => void;
@@ -42,6 +48,22 @@ interface CodeFlowState {
   stepBackward: () => void;
   jumpToStart: () => void;
   jumpToEnd: () => void;
+
+  // Conversational AI Tutor & Selection Context
+  selectedItem: { name: string; type: 'variable' | 'array_element' | 'frame'; details?: string } | null;
+  chatHistory: { role: 'user' | 'assistant'; content: string }[];
+  teachingMode: 'beginner' | 'intermediate' | 'advanced' | 'interview' | 'debug';
+  chatLoading: boolean;
+  setSelectedItem: (item: { name: string; type: 'variable' | 'array_element' | 'frame'; details?: string } | null) => void;
+  setTeachingMode: (mode: 'beginner' | 'intermediate' | 'advanced' | 'interview' | 'debug') => void;
+  clearChat: () => void;
+  sendChatMessage: (msg: string) => Promise<void>;
+  reviewCode: () => Promise<void>;
+
+  // AI Tutor Panel Drawer State
+  aiTutorOpen: boolean;
+  toggleAiTutor: () => void;
+  setAiTutorOpen: (open: boolean) => void;
 }
 
 // Default starter programs
@@ -112,6 +134,11 @@ int main() {
 let activeInterpreter: ASTInterpreter | null = null;
 let activeGenerator: Generator<ExecutionStep, ExecutionStep[], string | undefined> | null = null;
 
+const logStepTransition = (oldIdx: number, newIdx: number, speed: number) => {
+  const delay = 1000 / speed;
+  console.log(`[Playback Engine] Selected Speed: ${speed}x | Calculated Delay: ${delay}ms | Step Transition: ${oldIdx} -> ${newIdx} | Timestamp: ${new Date().toISOString()}`);
+};
+
 export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   code: DEFAULT_PROGRAMS.python,
   language: 'python',
@@ -127,6 +154,16 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   executionError: null,
   theme: 'dark',
 
+  explanations: {},
+  explanationsLoading: false,
+  explanationsError: null,
+
+  selectedItem: null,
+  chatHistory: [],
+  teachingMode: 'beginner',
+  chatLoading: false,
+  aiTutorOpen: false,
+
   setCode: (code) => set({ code }),
   setLanguage: (language) => set({ 
     language, 
@@ -137,8 +174,70 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     stdout: '',
     awaitingInput: null,
     editorStatus: 'ready',
-    executionError: null
+    executionError: null,
+    explanations: {},
+    explanationsLoading: false,
+    explanationsError: null,
+    selectedItem: null,
+    chatHistory: [],
+    chatLoading: false
   }),
+
+  fetchBatchExplanations: async () => {
+    const { steps, code, language, explanationsLoading } = get();
+    if (steps.length === 0 || explanationsLoading) return;
+
+    set({ explanationsLoading: true, explanationsError: null });
+
+    try {
+      const response = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          feature: 'explain_batch',
+          language,
+          context: {
+            code,
+            lineNumber: 1,
+            operation: 'system',
+            variables: [],
+            callStack: [],
+            stdout: ''
+          },
+          trace: steps
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch batch explanations');
+      }
+
+      const data = await response.json();
+      let parsedExplanations: string[] = [];
+      try {
+        parsedExplanations = JSON.parse(data.explanation);
+      } catch {
+        const cleaned = data.explanation.replace(/```json/g, '').replace(/```/g, '').trim();
+        parsedExplanations = JSON.parse(cleaned);
+      }
+
+      const explanationsMap: Record<number, string> = {};
+      parsedExplanations.forEach((exp: string, idx: number) => {
+        explanationsMap[idx] = exp;
+      });
+
+      set({
+        explanations: explanationsMap,
+        explanationsLoading: false
+      });
+    } catch (err) {
+      console.error(err);
+      set({
+        explanationsError: err instanceof Error ? err.message : 'Failed to preload explanations',
+        explanationsLoading: false
+      });
+    }
+  },
 
   toggleBreakpoint: (line) => set((state) => ({
     breakpoints: state.breakpoints.includes(line)
@@ -151,8 +250,9 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   toggleTheme: () => set((state) => ({ theme: state.theme === 'light' ? 'dark' : 'light' })),
   
   setCurrentStepIndex: (index) => {
-    const { steps } = get();
+    const { steps, currentStepIndex, speed } = get();
     if (index >= 0 && index < steps.length) {
+      logStepTransition(currentStepIndex, index, speed);
       set({ 
         currentStepIndex: index,
         stdout: steps[index].stdout
@@ -165,7 +265,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   })),
 
   submitInput: (val) => {
-    const { awaitingInput, playbackState } = get();
+    const { awaitingInput, steps } = get();
     if (!awaitingInput) return;
 
     set({ awaitingInput: null });
@@ -173,35 +273,44 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     // Resume generator execution with input value
     if (activeGenerator) {
       try {
-        const nextStep = activeGenerator.next(val);
-        const currentSteps = [...get().steps];
+        let currentInputQueue = [...get().inputQueue];
+        let result = activeGenerator.next(val);
+        const newSteps = [...steps];
         
-        if (nextStep.done) {
+        while (!result.done) {
+          const step = result.value;
+          newSteps.push(step);
+          
+          if (step.awaitingInput) {
+            if (currentInputQueue.length > 0) {
+              const nextInputVal = currentInputQueue[0];
+              currentInputQueue = currentInputQueue.slice(1);
+              set({ inputQueue: currentInputQueue });
+              result = activeGenerator.next(nextInputVal);
+              continue;
+            } else {
+              break;
+            }
+          }
+          result = activeGenerator.next();
+        }
+
+        set({ 
+          steps: newSteps,
+          playbackState: 'playing'
+        });
+
+        if (result.done) {
           set({ 
-            playbackState: 'finished',
             editorStatus: 'finished'
           });
           activeGenerator = null;
           activeInterpreter = null;
-        } else {
-          const step: ExecutionStep = nextStep.value;
-          currentSteps.push(step);
-          set({ 
-            steps: currentSteps, 
-            currentStepIndex: currentSteps.length - 1,
-            stdout: step.stdout
-          });
-
-          if (step.awaitingInput) {
-            set({ 
-              awaitingInput: step.awaitingInput, 
-              playbackState: 'awaiting_input' 
-            });
-          } else {
-            // Auto resume if it was playing
-            set({ playbackState: playbackState === 'awaiting_input' ? 'playing' : playbackState });
-          }
+          get().fetchBatchExplanations();
         }
+
+        get().stepForward();
+
       } catch (err) {
         set({ 
           playbackState: 'idle',
@@ -221,7 +330,13 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       editorStatus: 'running',
       stdout: '',
       awaitingInput: null,
-      executionError: null
+      executionError: null,
+      explanations: {},
+      explanationsLoading: false,
+      explanationsError: null,
+      selectedItem: null,
+      chatHistory: [],
+      chatLoading: false
     });
 
     try {
@@ -229,61 +344,51 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       activeInterpreter = new ASTInterpreter(code, language);
       activeGenerator = activeInterpreter.run();
 
-      const initialSteps: ExecutionStep[] = [];
+      const generatedSteps: ExecutionStep[] = [];
+      let currentInputQueue = [...get().inputQueue];
+      let result = activeGenerator.next();
       
-      // Let's run initial statements until finished, error, or awaiting input
-      const runNext = () => {
-        if (!activeGenerator) return;
-
-        // Check preloaded input queue
-        const nextInput = get().inputQueue.length > 0 ? get().inputQueue[0] : undefined;
-        let dequeued = false;
-
-        const result = activeGenerator.next(nextInput);
-        if (!result.done && nextInput !== undefined && result.value.awaitingInput) {
-          // Dequeue
-          set((state) => ({ inputQueue: state.inputQueue.slice(1) }));
-          dequeued = true;
-        }
-
-        if (result.done) {
-          set({ 
-            playbackState: 'finished',
-            editorStatus: 'finished'
-          });
-          activeGenerator = null;
-          activeInterpreter = null;
-        } else {
-          const step: ExecutionStep = result.value;
-          initialSteps.push(step);
-          
-          set({ 
-            steps: [...initialSteps],
-            currentStepIndex: initialSteps.length - 1,
-            stdout: step.stdout
-          });
-
-          // Check if breakpoint is hit (only pause if we are past first statement)
-          const breakpoints = get().breakpoints;
-          const hitBreakpoint = breakpoints.includes(step.lineNumber) && initialSteps.length > 1;
-
-          if (step.awaitingInput && !dequeued) {
-            set({ 
-              awaitingInput: step.awaitingInput,
-              playbackState: 'awaiting_input'
-            });
-          } else if (hitBreakpoint) {
-            set({ playbackState: 'paused' });
+      while (!result.done) {
+        const step = result.value;
+        generatedSteps.push(step);
+        
+        if (step.awaitingInput) {
+          if (currentInputQueue.length > 0) {
+            const nextInputVal = currentInputQueue[0];
+            currentInputQueue = currentInputQueue.slice(1);
+            set({ inputQueue: currentInputQueue });
+            result = activeGenerator.next(nextInputVal);
+            continue;
           } else {
-            // Schedule next execution step if playing
-            if (get().playbackState === 'playing') {
-              setTimeout(runNext, 50); // Small interval for background trace updates
-            }
+            break;
           }
         }
-      };
+        result = activeGenerator.next();
+      }
 
-      runNext();
+      if (generatedSteps.length === 0) {
+        throw new Error("No steps generated.");
+      }
+
+      const firstStep = generatedSteps[0];
+      const isFirstAwaiting = firstStep.awaitingInput !== undefined && firstStep.awaitingInput !== null;
+
+      set({
+        steps: generatedSteps,
+        currentStepIndex: 0,
+        playbackState: isFirstAwaiting ? 'awaiting_input' : 'playing',
+        awaitingInput: firstStep.awaitingInput || null,
+        stdout: firstStep.stdout || ''
+      });
+
+      if (result.done) {
+        set({ 
+          editorStatus: 'finished'
+        });
+        activeGenerator = null;
+        activeInterpreter = null;
+        get().fetchBatchExplanations();
+      }
 
     } catch (err) {
       set({
@@ -303,63 +408,49 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       awaitingInput: null,
       steps: [],
       currentStepIndex: 0,
-      stdout: ''
+      stdout: '',
+      explanations: {},
+      explanationsLoading: false,
+      explanationsError: null,
+      selectedItem: null,
+      chatHistory: [],
+      chatLoading: false
     });
   },
 
   stepForward: () => {
-    const { currentStepIndex, steps, playbackState } = get();
+    const { currentStepIndex, steps, playbackState, speed } = get();
     if (playbackState === 'awaiting_input') return;
 
     if (currentStepIndex < steps.length - 1) {
+      const nextIndex = currentStepIndex + 1;
+      const nextStep = steps[nextIndex];
+      logStepTransition(currentStepIndex, nextIndex, speed);
+      
       set({ 
-        currentStepIndex: currentStepIndex + 1,
-        stdout: steps[currentStepIndex + 1].stdout
+        currentStepIndex: nextIndex,
+        stdout: nextStep.stdout
       });
-    } else if (activeGenerator) {
-      // Generate next step on demand
-      try {
-        const nextStep = activeGenerator.next();
-        if (nextStep.done) {
-          set({ 
-            playbackState: 'finished',
-            editorStatus: 'finished'
-          });
-          activeGenerator = null;
-          activeInterpreter = null;
-        } else {
-          const step: ExecutionStep = nextStep.value;
-          const newSteps = [...steps, step];
-          set({
-            steps: newSteps,
-            currentStepIndex: newSteps.length - 1,
-            stdout: step.stdout
-          });
 
-          if (step.awaitingInput) {
-            set({ 
-              awaitingInput: step.awaitingInput,
-              playbackState: 'awaiting_input'
-            });
-          }
-        }
-      } catch (err) {
+      if (nextStep.awaitingInput) {
         set({
-          editorStatus: 'error',
-          executionError: { message: err instanceof Error ? err.message : 'Execution error', line: 1 }
+          awaitingInput: nextStep.awaitingInput,
+          playbackState: 'awaiting_input'
         });
       }
     }
   },
 
   stepBackward: () => {
-    const { currentStepIndex, steps, playbackState } = get();
+    const { currentStepIndex, steps, playbackState, speed } = get();
     if (playbackState === 'awaiting_input') return;
 
     if (currentStepIndex > 0) {
+      const nextIndex = currentStepIndex - 1;
+      logStepTransition(currentStepIndex, nextIndex, speed);
       set({ 
-        currentStepIndex: currentStepIndex - 1,
-        stdout: steps[currentStepIndex - 1].stdout
+        currentStepIndex: nextIndex,
+        stdout: steps[nextIndex].stdout
       });
     }
   },
@@ -382,5 +473,64 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
         stdout: steps[steps.length - 1].stdout
       });
     }
-  }
+  },
+
+  setSelectedItem: (selectedItem) => set({ selectedItem }),
+  setTeachingMode: (teachingMode) => set({ teachingMode }),
+  clearChat: () => set({ chatHistory: [] }),
+  sendChatMessage: async (msg) => {
+    const { chatHistory, code, language, steps, currentStepIndex, executionError, selectedItem, teachingMode } = get();
+    
+    // Add user message to history immediately
+    const updatedHistory = [...chatHistory, { role: 'user' as const, content: msg }];
+    set({ chatHistory: updatedHistory, chatLoading: true });
+
+    try {
+      const currentStep = steps[currentStepIndex];
+      const context = {
+        code,
+        lineNumber: currentStep ? currentStep.lineNumber : (executionError?.line || 1),
+        operation: currentStep ? currentStep.operation : 'system',
+        variables: currentStep ? currentStep.variables : [],
+        callStack: currentStep ? currentStep.callStack : [],
+        stdout: currentStep ? currentStep.stdout : '',
+        error: executionError || undefined
+      };
+
+      const response = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          feature: 'chat',
+          context,
+          language,
+          chatHistory: updatedHistory,
+          selectedItem,
+          teachingMode,
+          userMessage: msg
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('AI Tutor unavailable at the moment');
+      }
+
+      const data = await response.json();
+      set({
+        chatHistory: [...updatedHistory, { role: 'assistant' as const, content: data.explanation }],
+        chatLoading: false
+      });
+    } catch (err) {
+      set({
+        chatHistory: [...updatedHistory, { role: 'assistant' as const, content: `Error: ${err instanceof Error ? err.message : 'Could not reach mentor.'}` }],
+        chatLoading: false
+      });
+    }
+  },
+  reviewCode: async () => {
+    const msg = 'Please review my code for bugs, edge cases, performance issues, and potential improvements.';
+    await get().sendChatMessage(msg);
+  },
+  toggleAiTutor: () => set((state) => ({ aiTutorOpen: !state.aiTutorOpen })),
+  setAiTutorOpen: (open: boolean) => set({ aiTutorOpen: open })
 }));

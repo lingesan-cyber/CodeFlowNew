@@ -16,7 +16,7 @@ function loadConfig(): AIProviderConfig {
   const temperature = parseFloat(process.env.AI_TEMPERATURE || '0.3');
 
   // Parse enabled features
-  const allFeatures: AIFeature[] = ['explain_step', 'explain_error', 'hint', 'quiz'];
+  const allFeatures: AIFeature[] = ['explain_step', 'explain_error', 'hint', 'quiz', 'explain_batch', 'chat'];
   const enabledFeatures = allFeatures.filter(f => 
     process.env[`AI_ENABLE_${f.toUpperCase()}`] !== 'false'
   );
@@ -82,6 +82,28 @@ export async function generateQuiz(request: AIRequest): Promise<AIResponse> {
   }
 }
 
+export async function generateBatchExplanations(request: AIRequest): Promise<AIResponse> {
+  if (!isFeatureEnabled('explain_batch')) {
+    return createFallbackResponse(request, 'AI batch explanations disabled');
+  }
+  try {
+    return await getAdapter().generate({ ...request, feature: 'explain_batch' });
+  } catch (e) {
+    return createFallbackResponse(request, e instanceof Error ? e.message : 'Unknown error');
+  }
+}
+
+export async function generateChatResponse(request: AIRequest): Promise<AIResponse> {
+  if (!isFeatureEnabled('chat')) {
+    return createFallbackResponse(request, 'AI chat tutor disabled');
+  }
+  try {
+    return await getAdapter().generate({ ...request, feature: 'chat' });
+  } catch (e) {
+    return createFallbackResponse(request, e instanceof Error ? e.message : 'Unknown error');
+  }
+}
+
 export async function checkAIHealth(): Promise<{ available: boolean; provider: string; model: string }> {
   try {
     const activeAdapter = getAdapter();
@@ -104,15 +126,29 @@ export function isFeatureEnabled(feature: AIFeature): boolean {
 
 // Fallback when AI is unavailable
 function createFallbackResponse(request: AIRequest, reason: string): AIResponse {
-  const fallbacks: Record<AIFeature, string> = {
+  if (request.feature === 'explain_batch') {
+    const trace = request.trace || [];
+    const explanations = trace.map(s => `${s.description}`);
+    return {
+      explanation: JSON.stringify(explanations),
+      confidence: 'low',
+      generatedAt: new Date().toISOString(),
+      provider: 'fallback',
+      model: 'none',
+      latencyMs: 0
+    };
+  }
+
+  const fallbacks: Record<Exclude<AIFeature, 'explain_batch'>, string> = {
     explain_step: `The program is executing: ${request.context.operation} at line ${request.context.lineNumber}.`,
     explain_error: `Error occurred: ${request.context.error?.message || 'Unknown error'}`,
     hint: 'Try tracing the variables step by step.',
-    quiz: 'What will be the value of the main variable after this step?'
+    quiz: 'What will be the value of the main variable after this step?',
+    chat: 'I am here to help. Could you try checking the variables state or asking another question?'
   };
 
   return {
-    explanation: fallbacks[request.feature] || `Fallback: ${reason}`,
+    explanation: fallbacks[request.feature as Exclude<AIFeature, 'explain_batch'>] || `Fallback: ${reason}`,
     confidence: 'low',
     generatedAt: new Date().toISOString(),
     provider: 'fallback',
