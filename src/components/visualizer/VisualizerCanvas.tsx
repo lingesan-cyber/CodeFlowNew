@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useCodeFlowStore } from '../../store/useCodeFlowStore';
 import { createSpring, updateSpring } from '../../utils/spring';
-import { Keyboard, RotateCcw } from 'lucide-react';
+import { Keyboard, RotateCcw, Play, Pause, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Variable, StackFrame, HeapObject, ExecutionStep } from '../../engine/types';
 
 interface RenderNode {
@@ -194,11 +194,54 @@ export default function VisualizerCanvas() {
     awaitingInput,
     submitInput,
     selectedItem,
-    setSelectedItem
+    setSelectedItem,
+    playbackState,
+    speed,
+    setPlaybackState,
+    setSpeed,
+    stepForward,
+    stepBackward
   } = useCodeFlowStore();
 
   // Auto-Fit Toggle State
   const [autoFit, setAutoFit] = useState(true);
+
+  // Speed Dropdown State & Refs
+  const [speedDropdownOpen, setSpeedDropdownOpen] = useState(false);
+  const speedDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close speed dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (speedDropdownRef.current && !speedDropdownRef.current.contains(event.target as Node)) {
+        setSpeedDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const speeds = [0.25, 0.5, 1, 2];
+  const speedLabels: Record<number, string> = {
+    0.25: 'Slowest',
+    0.5: 'Slower',
+    1: 'Normal',
+    2: 'Fastest'
+  };
+
+  const handlePlayPause = () => {
+    if (playbackState === 'playing') {
+      setPlaybackState('paused');
+    } else {
+      if (playbackState === 'finished' || steps.length === 0) {
+        useCodeFlowStore.getState().runCode();
+      } else {
+        setPlaybackState('playing');
+      }
+    }
+  };
+
+  const isControlsDisabled = awaitingInput !== null || steps.length === 0;
 
   // Zoom & Pan Springs for ultra-smooth transitions
   const zoomSpringRef = useRef(createSpring(1));
@@ -1293,25 +1336,107 @@ export default function VisualizerCanvas() {
         className="block cursor-grab active:cursor-grabbing w-full h-full"
       />
 
-      {/* Floating Canvas UI Controls: Auto-Fit Toggle & Zoom Status */}
-      <div className="absolute top-4 left-4 flex items-center space-x-2.5 z-20">
-        {/* Auto Fit toggle */}
-        <div className="flex items-center space-x-2 bg-slate-950/85 border border-slate-800/60 rounded-full px-3 py-1.5 backdrop-blur-md shadow-lg">
-          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
-            Auto-Fit
-          </span>
+      {/* Floating Canvas UI Controls: Playback, Auto-Fit Toggle, Speed Dropdown */}
+      <div className="absolute top-4 left-4 flex items-center space-x-2 z-20">
+        <div className="flex items-center space-x-2 bg-slate-950/85 border border-slate-800/60 rounded-full p-1.5 backdrop-blur-md shadow-lg">
+          {/* Previous Button */}
           <button
-            onClick={() => setAutoFit(!autoFit)}
-            className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-              autoFit ? 'bg-blue-600' : 'bg-slate-700'
-            }`}
+            onClick={stepBackward}
+            disabled={isControlsDisabled}
+            className="p-1 rounded-full text-slate-400 hover:text-slate-200 hover:bg-slate-850 disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent transition-colors cursor-pointer"
+            title="Previous Step"
           >
-            <span
-              className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
-                autoFit ? 'translate-x-3.5' : 'translate-x-0'
-              }`}
-            />
+            <ChevronLeft size={16} />
           </button>
+
+          {/* Play/Pause Button */}
+          <button
+            onClick={handlePlayPause}
+            disabled={awaitingInput !== null}
+            className={`p-1.5 rounded-full text-white transition-all active:scale-95 cursor-pointer flex items-center justify-center ${
+              awaitingInput
+                ? 'bg-slate-750 opacity-60 shadow-none'
+                : playbackState === 'playing'
+                  ? 'bg-amber-600 hover:bg-amber-500 shadow-lg shadow-amber-900/35'
+                  : 'bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-900/35'
+            }`}
+            title={playbackState === 'playing' ? 'Pause (Space)' : 'Play (Space)'}
+          >
+            {awaitingInput ? (
+              <span className="text-[8px] font-bold tracking-wider px-1">WAITING</span>
+            ) : playbackState === 'playing' ? (
+              <Pause size={12} fill="white" />
+            ) : (
+              <Play size={12} fill="white" />
+            )}
+          </button>
+
+          {/* Next Button */}
+          <button
+            onClick={stepForward}
+            disabled={isControlsDisabled}
+            className="p-1 rounded-full text-slate-400 hover:text-slate-200 hover:bg-slate-850 disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent transition-colors cursor-pointer"
+            title="Next Step"
+          >
+            <ChevronRight size={16} />
+          </button>
+
+          <div className="w-px h-4 bg-slate-800/80 mx-1" />
+
+          {/* Auto Fit toggle */}
+          <div className="flex items-center space-x-1.5 px-1.5">
+            <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">
+              Auto-Fit
+            </span>
+            <button
+              onClick={() => setAutoFit(!autoFit)}
+              className={`relative inline-flex h-4 w-7.5 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                autoFit ? 'bg-blue-600' : 'bg-slate-700'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
+                  autoFit ? 'translate-x-3.5' : 'translate-x-0.5'
+                } mt-[1px]`}
+              />
+            </button>
+          </div>
+
+          <div className="w-px h-4 bg-slate-800/80 mx-1" />
+
+          {/* Speed Dropdown */}
+          <div className="relative" ref={speedDropdownRef}>
+            <button
+              onClick={() => setSpeedDropdownOpen(!speedDropdownOpen)}
+              disabled={awaitingInput !== null}
+              className="flex items-center space-x-1 px-2.5 py-1 text-[10px] font-bold text-slate-300 hover:text-slate-100 hover:bg-slate-800/60 rounded-full transition-all cursor-pointer focus:outline-none disabled:opacity-40 select-none"
+            >
+              <span>Speed: {speedLabels[speed]}</span>
+              <span className="text-[8px] text-slate-400">▼</span>
+            </button>
+            
+            {speedDropdownOpen && (
+              <div className="absolute left-0 mt-2 w-28 bg-slate-950 border border-slate-850 rounded-lg shadow-2xl py-1 z-30 animate-fade-in">
+                {speeds.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => {
+                      setSpeed(s);
+                      setSpeedDropdownOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between px-3 py-1.5 text-left text-[10px] font-bold transition-colors hover:bg-slate-800 hover:text-slate-100 ${
+                      speed === s
+                        ? 'bg-blue-600/10 text-blue-400'
+                        : 'text-slate-400'
+                    }`}
+                  >
+                    <span>{speedLabels[s]}</span>
+                    {speed === s && <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1409,6 +1534,23 @@ export default function VisualizerCanvas() {
               Submit Input
             </button>
           </form>
+        </div>
+      )}
+
+      {/* Before Execution Overlay */}
+      {steps.length === 0 && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm z-30 animate-fade-in p-6">
+          <div className="text-center max-w-sm bg-slate-900 border border-slate-850 p-8 rounded-2xl shadow-2xl flex flex-col items-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 mb-1">
+              <Play size={20} fill="currentColor" className="ml-0.5" />
+            </div>
+            <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider">
+              ▶ Run Your Program
+            </h3>
+            <p className="text-xs text-slate-400 font-medium font-sans">
+              Visual execution trace will appear here.
+            </p>
+          </div>
         </div>
       )}
     </div>

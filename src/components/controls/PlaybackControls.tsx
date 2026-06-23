@@ -13,7 +13,6 @@ export default function PlaybackControls() {
     playbackState,
     speed,
     awaitingInput,
-    setCurrentStepIndex,
     setPlaybackState,
     setSpeed,
     stepForward,
@@ -99,7 +98,14 @@ export default function PlaybackControls() {
 
   const totalSteps = steps.length;
 
-  const speeds = [0.25, 0.5, 1, 2, 4, 8, 16];
+  const speeds = [0.25, 0.5, 1, 2];
+
+  const speedLabels: Record<number, string> = {
+    0.25: 'Slowest',
+    0.5: 'Slower',
+    1: 'Normal',
+    2: 'Fastest'
+  };
 
   const handlePlayPause = () => {
     if (playbackState === 'playing') {
@@ -111,11 +117,6 @@ export default function PlaybackControls() {
         setPlaybackState('playing');
       }
     }
-  };
-
-  const handleProgressChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const idx = parseInt(e.target.value, 10);
-    setCurrentStepIndex(idx);
   };
 
   const isControlsDisabled = awaitingInput !== null || steps.length === 0;
@@ -183,28 +184,17 @@ export default function PlaybackControls() {
         </button>
       </div>
 
-      {/* Scrubber Progress Bar */}
-      <div className="flex-1 max-w-xl mx-8 flex flex-col space-y-1">
-        <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-          <span>Step {totalSteps > 0 ? currentStepIndex + 1 : 0} of {totalSteps}</span>
-          <span className="truncate max-w-[280px]">
-            {totalSteps > 0 && steps[currentStepIndex]
-              ? `Line ${steps[currentStepIndex].lineNumber}: ${steps[currentStepIndex].description}`
-              : 'Compile and Run code to start visual tracing'}
-          </span>
-        </div>
-
-        <div className="relative flex items-center">
-          <input
-            type="range"
-            min={0}
-            max={totalSteps > 0 ? totalSteps - 1 : 0}
-            value={currentStepIndex}
-            onChange={handleProgressChange}
-            disabled={totalSteps === 0 || awaitingInput !== null}
-            className="w-full h-1.5 bg-slate-850 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          />
-        </div>
+      {/* Scrubber Status Area */}
+      <div className="flex-1 max-w-xl mx-8 flex items-center justify-center text-sm font-mono text-slate-300">
+        {totalSteps > 0 ? (
+          currentStepIndex < totalSteps - 1 ? (
+            <span>Step {currentStepIndex + 1} of {totalSteps}</span>
+          ) : (
+            <span className="text-emerald-400 font-bold tracking-wider">Execution Complete</span>
+          )
+        ) : (
+          <span className="text-slate-500">Compile and Run code to start visual tracing</span>
+        )}
       </div>
 
       {/* Speed Slider Configuration */}
@@ -216,13 +206,13 @@ export default function PlaybackControls() {
               key={s}
               onClick={() => setSpeed(s)}
               disabled={awaitingInput !== null}
-              className={`px-2 py-1 text-[10px] font-mono font-bold rounded transition-colors cursor-pointer ${
+              className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded transition-colors cursor-pointer ${
                 speed === s
                   ? 'bg-blue-600 text-white shadow'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800 disabled:opacity-30'
               }`}
             >
-              {s}x
+              {speedLabels[s]}
             </button>
           ))}
         </div>

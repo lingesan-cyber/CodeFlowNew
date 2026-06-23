@@ -29,7 +29,7 @@ export function tokenize(code: string, lang: string): Token[] {
     'def', 'class', 'int', 'float', 'double', 'char', 'void', 'struct', 'Scanner', 'System',
     'out', 'println', 'print', 'printf', 'scanf', 'cin', 'cout', 'include', 'import', 'from',
     'delete', 'in', 'range', 'elif', 'and', 'or', 'not', 'nullptr', 'NULL', 'true', 'false',
-    'bool', 'boolean', 'String', 'prompt'
+    'bool', 'boolean', 'String', 'prompt', 'using', 'namespace'
   ]);
 
   // Strip single-line and multi-line comments first or skip them in tokenization
@@ -142,7 +142,7 @@ export function tokenize(code: string, lang: string): Token[] {
       continue;
     }
 
-    const multiOps = ['==', '!=', '<=', '>=', '&&', '||', '+=', '-=', '->', '<<', '>>', '++', '--'];
+    const multiOps = ['==', '!=', '<=', '>=', '&&', '||', '+=', '-=', '*=', '/=', '%=', '->', '<<', '>>', '++', '--', '::'];
     const subStr = code.slice(i, i + 2);
     if (multiOps.includes(subStr)) {
       tokens.push({ type: 'OPERATOR', value: subStr, line, col, index: i });

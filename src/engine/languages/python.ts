@@ -226,6 +226,7 @@ export class PythonParser extends BaseParser {
       return {
         type: 'Output',
         exprs,
+        appendNewline: true,
         loc: this.getLoc(startToken)
       };
     }

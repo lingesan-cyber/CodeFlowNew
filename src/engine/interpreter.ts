@@ -169,7 +169,6 @@ export class ASTInterpreter {
       throw new Error('Maximum execution steps exceeded');
     }
 
-    this.stepCount++;
     const line = stmt.loc.line;
 
     switch (stmt.type) {
@@ -272,13 +271,30 @@ export class ASTInterpreter {
         for (const e of stmt.exprs) {
           outputs.push(yield* this.evaluateExpression(e, funcs));
         }
-        const outStr = outputs.map(o => (o === null || o === undefined ? 'null' : String(o))).join(' ') + '\n';
+
+        let outStr = '';
+        const appendNewline = stmt.appendNewline !== false;
+
+        if ((this.lang === 'c' || this.lang === 'cpp') && outputs.length > 0 && typeof outputs[0] === 'string') {
+          outStr = this.formatPrintf(outputs[0], outputs.slice(1));
+        } else {
+          outStr = outputs.map(o => {
+            if (o === null || o === undefined) return 'null';
+            if (typeof o === 'string') return this.unescapeString(o);
+            return String(o);
+          }).join(' ');
+        }
+
+        if (appendNewline) {
+          outStr += '\n';
+        }
+
         this.stdout += outStr;
 
         yield this.createStep(
           line,
           'output',
-          `Print output: ${outStr.trim()}`,
+          `Print output: ${outStr.replace(/\n$/, '').trim()}`,
           stmt.loc
         );
         break;
@@ -357,6 +373,20 @@ export class ASTInterpreter {
 
       case 'ExpressionStatement': {
         yield* this.evaluateExpression(stmt.expr, funcs);
+        const expr = stmt.expr;
+        const isAssignment = expr.type === 'BinaryOp' && [
+          '=', '+=', '-=', '*=', '/=', '%=',
+          '++_prefix', '--_prefix', '++_postfix', '--_postfix'
+        ].includes(expr.operator);
+
+        if (isAssignment) {
+          yield this.createStep(
+            line,
+            'assignment',
+            `Update variable: ${this.exprToString(expr)}`,
+            stmt.loc
+          );
+        }
         break;
       }
     }
@@ -489,14 +519,37 @@ export class ASTInterpreter {
           case '>=': return (left as number) >= (right as number);
           case '&&': return (left as boolean) && (right as boolean);
           case '||': return (left as boolean) || (right as boolean);
-          case '=': return right;
-          case '+=': {
-            if (typeof left === 'string' || typeof right === 'string') {
-              return String(left) + String(right);
-            }
-            return (left as number) + (right as number);
+          case '=': {
+            yield* this.assignValue(expr.left, right, activeFuncs);
+            return right;
           }
-          case '-=': return (left as number) - (right as number);
+          case '+=': {
+            const val = (typeof left === 'string' || typeof right === 'string')
+              ? String(left) + String(right)
+              : (left as number) + (right as number);
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
+          case '-=': {
+            const val = (left as number) - (right as number);
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
+          case '*=': {
+            const val = (left as number) * (right as number);
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
+          case '/=': {
+            const val = (right as number) !== 0 ? (left as number) / (right as number) : 0;
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
+          case '%=': {
+            const val = (left as number) % (right as number);
+            yield* this.assignValue(expr.left, val, activeFuncs);
+            return val;
+          }
           case '++_prefix': {
             const val = Number(left) + 1;
             yield* this.assignValue(expr.left, val, activeFuncs);
@@ -692,6 +745,7 @@ export class ASTInterpreter {
     description: string,
     loc?: SourceLocation
   ): ExecutionStep {
+    this.stepCount++;
     // Perform deep clones of active state to prevent references mutating past steps
     const clonedGlobals: Variable[] = Array.from(this.globals.values()).map(v => ({ ...v }));
     const clonedStack: StackFrame[] = this.stack.map(f => {
@@ -744,7 +798,15 @@ export class ASTInterpreter {
     switch (expr.type) {
       case 'Literal': return JSON.stringify(expr.value);
       case 'Identifier': return expr.name;
-      case 'BinaryOp': return `${this.exprToString(expr.left)} ${expr.operator} ${this.exprToString(expr.right)}`;
+      case 'BinaryOp': {
+        if (expr.operator.endsWith('_prefix')) {
+          return `${expr.operator.replace('_prefix', '')}${this.exprToString(expr.left)}`;
+        }
+        if (expr.operator.endsWith('_postfix')) {
+          return `${this.exprToString(expr.left)}${expr.operator.replace('_postfix', '')}`;
+        }
+        return `${this.exprToString(expr.left)} ${expr.operator} ${this.exprToString(expr.right)}`;
+      }
       case 'AddressOf': return `&${expr.targetName}`;
       case 'PointerDeref': return `*${this.exprToString(expr.pointerExpr)}`;
       case 'ArrayAccess': return `${this.exprToString(expr.arrayExpr)}[${this.exprToString(expr.indexExpr)}]`;
@@ -754,5 +816,93 @@ export class ASTInterpreter {
       case 'NewInstance': return `new ${expr.className}(...)`;
       default: return '';
     }
+  }
+
+  private unescapeString(str: string): string {
+    let result = '';
+    let i = 0;
+    while (i < str.length) {
+      const char = str[i];
+      if (char === '\\' && i + 1 < str.length) {
+        const nextChar = str[i + 1];
+        if (nextChar === 'n') result += '\n';
+        else if (nextChar === 't') result += '\t';
+        else if (nextChar === '\\') result += '\\';
+        else if (nextChar === '"') result += '"';
+        else if (nextChar === "'") result += "'";
+        else result += '\\' + nextChar;
+        i += 2;
+      } else {
+        result += char;
+        i++;
+      }
+    }
+    return result;
+  }
+
+  private formatPrintf(formatStr: string, args: unknown[]): string {
+    let result = '';
+    let argIndex = 0;
+    let i = 0;
+    while (i < formatStr.length) {
+      const char = formatStr[i];
+      if (char === '%' && i + 1 < formatStr.length) {
+        let specifier = '';
+        let nextIdx = i + 1;
+        
+        while (nextIdx < formatStr.length && /[0-9.-]/.test(formatStr[nextIdx])) {
+          specifier += formatStr[nextIdx];
+          nextIdx++;
+        }
+        
+        if (nextIdx < formatStr.length) {
+          const typeChar = formatStr[nextIdx];
+          specifier += typeChar;
+          nextIdx++;
+          
+          if (argIndex < args.length) {
+            const val = args[argIndex++];
+            if (typeChar === 'd' || typeChar === 'i') {
+              result += String(Math.floor(Number(val)));
+            } else if (typeChar === 'f') {
+              if (specifier.startsWith('.')) {
+                const precision = parseInt(specifier.substring(1, specifier.length - 1), 10);
+                if (!isNaN(precision)) {
+                  result += Number(val).toFixed(precision);
+                } else {
+                  result += String(Number(val));
+                }
+              } else {
+                result += String(Number(val));
+              }
+            } else if (typeChar === 's') {
+              result += val === null || val === undefined ? 'null' : String(val);
+            } else if (typeChar === 'c') {
+              result += typeof val === 'string' ? val[0] : String.fromCharCode(Number(val));
+            } else {
+              result += '%' + specifier;
+            }
+          } else {
+            result += '%' + specifier;
+          }
+          i = nextIdx;
+        } else {
+          result += '%';
+          i++;
+        }
+      } else if (char === '\\' && i + 1 < formatStr.length) {
+        const nextChar = formatStr[i + 1];
+        if (nextChar === 'n') result += '\n';
+        else if (nextChar === 't') result += '\t';
+        else if (nextChar === '\\') result += '\\';
+        else if (nextChar === '"') result += '"';
+        else result += '\\' + nextChar;
+        i += 2;
+      } else {
+        result += char;
+        i++;
+      }
+    }
+    return result;
   }
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import MonacoEditor, { Monaco } from '@monaco-editor/react';
 import { useCodeFlowStore, SupportedLanguage } from '../../store/useCodeFlowStore';
 import { Play, Square, AlertCircle } from 'lucide-react';
@@ -34,6 +34,28 @@ export default function Editor({ readOnly = false }: EditorProps) {
   const currentLineDecorationIdRef = useRef<string[]>([]);
   const currentStepIndex = useCodeFlowStore((state) => state.currentStepIndex);
   const steps = useCodeFlowStore((state) => state.steps);
+
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const languageIcons: Record<SupportedLanguage, string> = {
+    python: '🐍',
+    javascript: '🟨',
+    java: '☕',
+    c: '🔵',
+    cpp: '⚙️'
+  };
 
   const languages: Array<{ val: SupportedLanguage; label: string }> = [
     { val: 'python', label: 'Python' },
@@ -144,22 +166,41 @@ export default function Editor({ readOnly = false }: EditorProps) {
     <div className="flex flex-col h-full bg-[#1E293B] border border-slate-700/60 rounded-xl overflow-hidden shadow-2xl relative">
       {/* Header bar with tabs and status */}
       <div className="flex items-center justify-between px-4 py-2 bg-slate-900/80 border-b border-slate-800">
-        <div className="flex items-center space-x-1" role="tablist" aria-label="Programming Language">
-          {languages.map((lang) => (
-            <button
-              key={lang.val}
-              onClick={() => handleLanguageChange(lang.val)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 ${
-                language === lang.val
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-              }`}
-              role="tab"
-              aria-selected={language === lang.val}
-            >
-              {lang.label}
-            </button>
-          ))}
+        <div className="relative" ref={dropdownRef}>
+          <button
+            onClick={() => setDropdownOpen(!dropdownOpen)}
+            className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-750 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-100 focus:outline-none transition-all cursor-pointer shadow-md select-none"
+            aria-haspopup="listbox"
+            aria-expanded={dropdownOpen}
+          >
+            <span>{languageIcons[language]}</span>
+            <span>{languages.find(l => l.val === language)?.label}</span>
+            <span className="text-[9px] text-slate-400">▼</span>
+          </button>
+          
+          {dropdownOpen && (
+            <div className="absolute left-0 mt-1.5 w-40 bg-slate-950 border border-slate-850 rounded-lg shadow-2xl py-1 z-30 animate-fade-in">
+              {languages.map((lang) => (
+                <button
+                  key={lang.val}
+                  onClick={() => {
+                    handleLanguageChange(lang.val);
+                    setDropdownOpen(false);
+                  }}
+                  className={`w-full flex items-center space-x-2 px-3 py-2 text-left text-xs font-medium transition-colors hover:bg-slate-800 hover:text-slate-100 ${
+                    language === lang.val
+                      ? 'bg-blue-600/10 text-blue-400 font-bold border-l-2 border-blue-500'
+                      : 'text-slate-400'
+                  }`}
+                  role="option"
+                  aria-selected={language === lang.val}
+                >
+                  <span>{languageIcons[lang.val]}</span>
+                  <span>{lang.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center space-x-3">

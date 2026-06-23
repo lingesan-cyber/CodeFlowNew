@@ -301,6 +301,7 @@ export class CParser extends BaseParser {
       return {
         type: 'Output',
         exprs,
+        appendNewline: false,
         loc: this.getLoc(startToken)
       };
     }

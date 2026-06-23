@@ -67,7 +67,13 @@ export abstract class BaseParser {
 
   private parseAssignment(): Expression {
     const left = this.parseLogicalOr();
-    if (this.match('OPERATOR', '=') || this.match('OPERATOR', '+=') || this.match('OPERATOR', '-=')) {
+    const isAssignOp = this.match('OPERATOR', '=') || 
+                       this.match('OPERATOR', '+=') || 
+                       this.match('OPERATOR', '-=') ||
+                       this.match('OPERATOR', '*=') ||
+                       this.match('OPERATOR', '/=') ||
+                       this.match('OPERATOR', '%=');
+    if (isAssignOp) {
       const opToken = this.next();
       const right = this.parseAssignment();
       return {

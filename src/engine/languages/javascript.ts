@@ -231,6 +231,7 @@ export class JSParser extends BaseParser {
       return {
         type: 'Output',
         exprs,
+        appendNewline: true,
         loc: this.getLoc(startToken)
       };
     }

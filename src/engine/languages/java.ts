@@ -267,7 +267,8 @@ export class JavaParser extends BaseParser {
       this.consume('PUNCTUATION', '.'); // .
       this.consume('KEYWORD', 'out'); // out
       this.consume('PUNCTUATION', '.'); // .
-      this.consume('KEYWORD'); // print or println
+      const printMethodToken = this.consume('KEYWORD'); // print or println
+      const appendNewline = printMethodToken.value === 'println';
       
       this.consume('PUNCTUATION', '(');
       const exprs: Expression[] = [];
@@ -280,6 +281,7 @@ export class JavaParser extends BaseParser {
       return {
         type: 'Output',
         exprs,
+        appendNewline,
         loc: this.getLoc(startToken)
       };
     }

@@ -1,16 +1,105 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import Navbar from '../../components/Navbar';
 import Editor from '../../components/editor/Editor';
 import VisualizerCanvas from '../../components/visualizer/VisualizerCanvas';
-import PlaybackControls from '../../components/controls/PlaybackControls';
 import AIPanel from '../../components/ai/AIPanel';
 import { useCodeFlowStore } from '../../store/useCodeFlowStore';
 import { Terminal, Sparkles } from 'lucide-react';
 
 export default function LearnIDE() {
-  const { stdout, currentStepIndex, steps, explanations, aiTutorOpen, toggleAiTutor } = useCodeFlowStore();
+  const {
+    stdout,
+    currentStepIndex,
+    steps,
+    explanations,
+    aiTutorOpen,
+    toggleAiTutor,
+    playbackState,
+    speed,
+    awaitingInput,
+    setPlaybackState,
+    setSpeed,
+    stepForward,
+    stepBackward,
+    jumpToStart,
+    jumpToEnd
+  } = useCodeFlowStore();
+
+  // Playback timer loop
+  useEffect(() => {
+    if (playbackState !== 'playing' || awaitingInput) return;
+
+    // Interval based on speed multiplier (1x = 1000ms, 2x = 500ms, etc.)
+    const intervalTime = 1000 / speed;
+    const timer = setInterval(() => {
+      const { currentStepIndex, steps, stepForward, setPlaybackState } = useCodeFlowStore.getState();
+      
+      // Stop playing if we reach the end of the current trace
+      if (currentStepIndex < steps.length - 1) {
+        stepForward();
+      } else {
+        setPlaybackState('finished');
+      }
+    }, intervalTime);
+
+    return () => clearInterval(timer);
+  }, [playbackState, speed, awaitingInput]);
+
+  // Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore shortcuts if user is typing in code editor or input fields
+      if (
+        document.activeElement?.tagName === 'INPUT' || 
+        document.activeElement?.tagName === 'TEXTAREA' ||
+        document.activeElement?.classList.contains('input')
+      ) {
+        return;
+      }
+
+      switch (e.code) {
+        case 'Space':
+          e.preventDefault();
+          if (playbackState === 'playing') {
+            setPlaybackState('paused');
+          } else if (playbackState === 'paused' || playbackState === 'idle' || playbackState === 'finished') {
+            // Auto restart if completed
+            if (playbackState === 'finished') {
+              useCodeFlowStore.getState().runCode();
+            } else {
+              setPlaybackState('playing');
+            }
+          }
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          stepBackward();
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          stepForward();
+          break;
+        case 'Home':
+          e.preventDefault();
+          jumpToStart();
+          break;
+        case 'End':
+          e.preventDefault();
+          jumpToEnd();
+          break;
+        // Speeds 1-4 keys
+        case 'Digit1': setSpeed(0.25); break;
+        case 'Digit2': setSpeed(0.5); break;
+        case 'Digit3': setSpeed(1); break;
+        case 'Digit4': setSpeed(2); break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [playbackState, stepBackward, stepForward, jumpToStart, jumpToEnd, setSpeed, setPlaybackState]);
 
   return (
     <div className="h-screen flex flex-col bg-[#0F172A] text-slate-100 overflow-hidden">
@@ -34,7 +123,7 @@ export default function LearnIDE() {
             <VisualizerCanvas />
 
             {/* Bottom Console panel */}
-            <div className="h-[140px] bg-slate-900 border border-slate-800/80 rounded-xl flex flex-col overflow-hidden shrink-0 shadow-lg">
+            <div className="h-[220px] bg-slate-900 border border-slate-800/80 rounded-xl flex flex-col overflow-hidden shrink-0 shadow-lg">
               <div className="px-4 py-1.5 bg-slate-950 border-b border-slate-850 flex items-center justify-between text-slate-400">
                 <div className="flex items-center space-x-1.5">
                   <Terminal size={12} />
@@ -58,19 +147,51 @@ export default function LearnIDE() {
                 ) : currentStepIndex < steps.length - 1 ? (
                   // Running / Stepping State
                   (() => {
-                    const explanationText = explanations[currentStepIndex] || 'Processing statement...';
+                    const currentStep = steps[currentStepIndex];
+                    const explanationText = explanations[currentStepIndex];
                     const hasStdout = stdout && stdout.trim().length > 0;
                     
+                    const splitDescription = (desc: string) => {
+                      const idx = desc.indexOf(':');
+                      if (idx !== -1) {
+                        return {
+                          title: desc.substring(0, idx).trim() + ':',
+                          detail: desc.substring(idx + 1).trim()
+                        };
+                      }
+                      return { title: desc, detail: '' };
+                    };
+                    
+                    const descParts = splitDescription(currentStep.description);
+
+                    const renderExplanationColumn = () => (
+                      <div className="flex-1 p-3 flex flex-col min-w-0">
+                        <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Execution Explanation</span>
+                        <div className="flex-1 overflow-y-auto">
+                          <div className="text-base font-bold text-blue-400">Line {currentStep.lineNumber}</div>
+                          <div className="mt-2 text-xs font-semibold text-slate-300">
+                            {descParts.title}
+                          </div>
+                          {descParts.detail && (
+                            <div className="mt-1 text-sm font-mono text-slate-100 font-bold">
+                              {descParts.detail}
+                            </div>
+                          )}
+                          {explanationText && (
+                            <div className="border-t border-slate-800/80 pt-2 mt-3 text-slate-400 text-[11px] leading-relaxed">
+                              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-1">AI Explanation</span>
+                              {explanationText}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+
                     if (hasStdout) {
                       return (
                         <div className="flex-1 flex divide-x divide-slate-800/80">
                           {/* Left Column: Explanation */}
-                          <div className="flex-1 p-3 flex flex-col min-w-0">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Execution Explanation</span>
-                            <div className="flex-1 overflow-y-auto text-slate-300 leading-relaxed whitespace-pre-wrap">
-                              {explanationText}
-                            </div>
-                          </div>
+                          {renderExplanationColumn()}
                           {/* Right Column: Accumulated Output */}
                           <div className="flex-1 p-3 flex flex-col min-w-0 bg-slate-950/20">
                             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Program Output</span>
@@ -81,14 +202,7 @@ export default function LearnIDE() {
                         </div>
                       );
                     } else {
-                      return (
-                        <div className="flex-1 p-3 flex flex-col min-w-0">
-                          <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Execution Explanation</span>
-                          <div className="flex-1 overflow-y-auto text-slate-300 leading-relaxed whitespace-pre-wrap">
-                            {explanationText}
-                          </div>
-                        </div>
-                      );
+                      return renderExplanationColumn();
                     }
                   })()
                 ) : (
@@ -130,8 +244,6 @@ export default function LearnIDE() {
         )}
       </main>
 
-      {/* Playback Controls Bar */}
-      <PlaybackControls />
     </div>
   );
 }

@@ -85,6 +85,7 @@ export interface ExpressionStatementNode extends BaseNode {
 export interface OutputNode extends BaseNode {
   type: 'Output';
   exprs: Expression[];
+  appendNewline?: boolean;
 }
 
 export interface InputNode extends BaseNode {

@@ -43,16 +43,37 @@ export class CPPParser extends BaseParser {
       return null;
     }
 
-    // Output: cout << x << endl;
+    // Output: cout << x << endl; or std::cout << x << endl;
+    let isCout = false;
+    let coutStartToken = t;
     if (t.type === 'KEYWORD' && t.value === 'cout') {
-      const startToken = this.next(); // cout
+      isCout = true;
+      coutStartToken = this.next(); // consume cout
+    } else if (t.type === 'IDENTIFIER' && t.value === 'std' && this.peek(1).value === '::' && this.peek(2).value === 'cout') {
+      isCout = true;
+      coutStartToken = this.next(); // consume std
+      this.next(); // consume ::
+      this.next(); // consume cout
+    }
+
+    if (isCout) {
       const exprs: Expression[] = [];
       while (this.match('OPERATOR', '<<')) {
         this.next(); // consume <<
-        // Check if next is endl
+        // Check if next is endl or std::endl
+        let isEndl = false;
         if (this.match('IDENTIFIER', 'endl')) {
+          isEndl = true;
           this.next();
-          exprs.push({ type: 'Literal', value: '\n', valueType: 'string', loc: this.getLoc(startToken) });
+        } else if (this.match('IDENTIFIER', 'std') && this.peek(1).value === '::' && this.peek(2).value === 'endl') {
+          isEndl = true;
+          this.next(); // std
+          this.next(); // ::
+          this.next(); // endl
+        }
+
+        if (isEndl) {
+          exprs.push({ type: 'Literal', value: '\n', valueType: 'string', loc: this.getLoc(coutStartToken) });
         } else {
           exprs.push(this.parseExpression());
         }
@@ -61,13 +82,25 @@ export class CPPParser extends BaseParser {
       return {
         type: 'Output',
         exprs,
-        loc: this.getLoc(startToken)
+        appendNewline: false,
+        loc: this.getLoc(coutStartToken)
       };
     }
 
-    // Input: cin >> x >> y;
+    // Input: cin >> x >> y; or std::cin >> x >> y;
+    let isCin = false;
+    let cinStartToken = t;
     if (t.type === 'KEYWORD' && t.value === 'cin') {
-      const startToken = this.next(); // cin
+      isCin = true;
+      cinStartToken = this.next(); // consume cin
+    } else if (t.type === 'IDENTIFIER' && t.value === 'std' && this.peek(1).value === '::' && this.peek(2).value === 'cin') {
+      isCin = true;
+      cinStartToken = this.next(); // consume std
+      this.next(); // consume ::
+      this.next(); // consume cin
+    }
+
+    if (isCin) {
       this.consume('OPERATOR', '>>');
       const targetExpr = this.parseExpression(); // Identifier or ArrayAccess
       this.consume('PUNCTUATION', ';');
@@ -77,7 +110,7 @@ export class CPPParser extends BaseParser {
         prompt: `Enter value:`,
         target: targetExpr,
         expectedType: 'string', // Type checking resolved by variable target in runtime
-        loc: this.getLoc(startToken)
+        loc: this.getLoc(cinStartToken)
       };
     }
 
@@ -85,13 +118,28 @@ export class CPPParser extends BaseParser {
     const typeKeywords = ['int', 'float', 'char', 'double', 'void', 'struct', 'bool', 'string', 'vector'];
     
     // We can also have pointers: int *p
-    const isType = typeKeywords.includes(t.value) || 
+    let isType = typeKeywords.includes(t.value) || 
       (t.type === 'IDENTIFIER' && this.peek(1).type === 'OPERATOR' && this.peek(1).value === '*') ||
       (t.type === 'IDENTIFIER' && this.peek(1).type === 'OPERATOR' && this.peek(1).value === '<'); // templates like vector<int>
 
+    let typePrefix = '';
+    if (!isType && t.type === 'IDENTIFIER' && t.value === 'std' && this.peek(1).value === '::') {
+      const actualType = this.peek(2);
+      if (typeKeywords.includes(actualType.value) || actualType.type === 'IDENTIFIER') {
+        isType = true;
+      }
+    }
+
     if (isType) {
-      const startToken = this.next(); // e.g. int, vector, string
-      let varType = startToken.value;
+      let startToken = t;
+      if (t.type === 'IDENTIFIER' && t.value === 'std' && this.peek(1).value === '::') {
+        this.next(); // std
+        this.next(); // ::
+        typePrefix = 'std::';
+        startToken = this.peek();
+      }
+      this.next(); // e.g. int, vector, string
+      let varType = typePrefix + startToken.value;
 
       // Handle templates e.g. vector<int>
       if (this.match('OPERATOR', '<')) {
@@ -114,8 +162,14 @@ export class CPPParser extends BaseParser {
         this.next(); // consume (
         const params: Array<{ name: string; type: string }> = [];
         while (!this.match('PUNCTUATION', ')') && !this.match('EOF')) {
+          let pPrefix = '';
+          if (this.match('IDENTIFIER', 'std') && this.peek(1).value === '::') {
+            this.next(); // std
+            this.next(); // ::
+            pPrefix = 'std::';
+          }
           const pTypeToken = this.next();
-          let pType = pTypeToken.value;
+          let pType = pPrefix + pTypeToken.value;
           if (this.match('OPERATOR', '<')) {
             this.next();
             pType += '<' + this.next().value + '>';
@@ -268,18 +322,32 @@ export class CPPParser extends BaseParser {
 
       let init: Statement | undefined;
       if (!this.match('PUNCTUATION', ';')) {
-        const isDecl = typeKeywords.includes(this.peek().value);
+        let isDecl = typeKeywords.includes(this.peek().value);
+        let forTypePrefix = '';
+        if (!isDecl && this.match('IDENTIFIER', 'std') && this.peek(1).value === '::') {
+          if (typeKeywords.includes(this.peek(2).value) || this.peek(2).type === 'IDENTIFIER') {
+            isDecl = true;
+          }
+        }
+
         if (isDecl) {
-          const dToken = this.next();
+          let forStartToken = this.peek();
+          if (this.match('IDENTIFIER', 'std') && this.peek(1).value === '::') {
+            this.next(); // std
+            this.next(); // ::
+            forTypePrefix = 'std::';
+            forStartToken = this.peek();
+          }
+          this.next(); // type
           const nameToken = this.consume('IDENTIFIER');
           this.consume('OPERATOR', '=');
           const valExpr = this.parseExpression();
           init = {
             type: 'VarDeclaration',
             name: nameToken.value,
-            varType: dToken.value,
+            varType: forTypePrefix + forStartToken.value,
             valueExpr: valExpr,
-            loc: this.getLoc(dToken)
+            loc: this.getLoc(forStartToken)
           };
         } else {
           const expr = this.parseExpression();
