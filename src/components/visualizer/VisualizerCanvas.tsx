@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useCodeFlowStore } from '../../store/useCodeFlowStore';
 import { createSpring, updateSpring } from '../../utils/spring';
 import { Keyboard, RotateCcw, Play, Pause, ChevronLeft, ChevronRight } from 'lucide-react';
-import { Variable, StackFrame, HeapObject, ExecutionStep } from '../../engine/types';
+import { Variable, StackFrame, HeapObject } from '../../engine/types';
 
 interface RenderNode {
   id: string;
@@ -22,14 +22,6 @@ interface RenderNode {
   currentValue?: string;
   valueChangeTime?: number;
   slotFlashes?: Record<number, { changeTime: number; oldValue: string }>;
-}
-
-interface HistoryEntry {
-  stepIndex: number;
-  line: number;
-  name: string;
-  oldValue: string;
-  newValue: string;
 }
 
 // Map variables/heap types to distinct educational colors
@@ -115,72 +107,7 @@ function getTypeTheme(type: string, value: unknown) {
   };
 }
 
-// Compute the last 3 variable modifications
-const getMemoryHistory = (steps: ExecutionStep[], currentIndex: number): HistoryEntry[] => {
-  const history: HistoryEntry[] = [];
-  
-  for (let i = 1; i <= currentIndex; i++) {
-    if (i >= steps.length) break;
-    const prevStep = steps[i - 1];
-    const currStep = steps[i];
-    
-    // Check variables that changed
-    currStep.variables.forEach(v => {
-      const prevV = prevStep.variables.find(pv => pv.name === v.name && pv.scope === v.scope);
-      const oldVal = prevV ? (prevV.value === null ? 'null' : String(prevV.value)) : 'undefined';
-      const newVal = v.value === null ? 'null' : String(v.value);
-      if (oldVal !== newVal) {
-        history.push({
-          stepIndex: i,
-          line: currStep.lineNumber,
-          name: v.name,
-          oldValue: oldVal,
-          newValue: newVal
-        });
-      }
-    });
 
-    // Check heap objects that changed
-    currStep.heap.forEach(h => {
-      const prevH = prevStep.heap.find(ph => ph.id === h.id);
-      if (prevH) {
-        const hArr = h.value as unknown[];
-        const prevArr = prevH.value as unknown[];
-        if (Array.isArray(hArr) && Array.isArray(prevArr)) {
-          hArr.forEach((val, idx) => {
-            const oldVal = prevArr[idx];
-            if (oldVal !== val) {
-              history.push({
-                stepIndex: i,
-                line: currStep.lineNumber,
-                name: `${h.id}[${idx}]`,
-                oldValue: oldVal === null ? 'null' : String(oldVal),
-                newValue: val === null ? 'null' : String(val)
-              });
-            }
-          });
-        } else if (typeof h.value === 'object' && typeof prevH.value === 'object' && h.value && prevH.value) {
-          const currVal = h.value as Record<string, unknown>;
-          const prevVal = prevH.value as Record<string, unknown>;
-          Object.keys(currVal).forEach(key => {
-            if (currVal[key] !== prevVal[key]) {
-              history.push({
-                stepIndex: i,
-                line: currStep.lineNumber,
-                name: `${h.id}.${key}`,
-                oldValue: prevVal[key] === undefined ? 'undefined' : String(prevVal[key]),
-                newValue: String(currVal[key])
-              });
-            }
-          });
-        }
-      }
-    });
-  }
-
-  // Return the last 3 changes
-  return history.slice(-3).reverse();
-};
 
 export default function VisualizerCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -263,7 +190,7 @@ export default function VisualizerCanvas() {
   // Input Field State
   const [inputValue, setInputValue] = useState('');
 
-  // Handle Resize using ResizeObserver on the container to detect sidebar transitions
+  // Handle Resize using ResizeObserver on the container
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -599,14 +526,8 @@ export default function VisualizerCanvas() {
         zoomSpanRef.current.textContent = `${Math.round(currentZoom * 100)}%`;
       }
 
-      // 2. Draw Premium Radial Background
-      const radialGrad = ctx.createRadialGradient(
-        canvas.width / 2, canvas.height / 2, 50,
-        canvas.width / 2, canvas.height / 2, Math.max(canvas.width, canvas.height) / 1.1
-      );
-      radialGrad.addColorStop(0, '#1E293B'); // slate-800
-      radialGrad.addColorStop(1, '#080C14'); // ultra dark slate
-      ctx.fillStyle = radialGrad;
+      // Draw solid clean debugger background
+      ctx.fillStyle = '#0F172A';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       ctx.save();
@@ -614,8 +535,8 @@ export default function VisualizerCanvas() {
       ctx.translate(currentPanX, currentPanY);
       ctx.scale(currentZoom, currentZoom);
 
-      // --- Subtle Grid (Extremely faint to avoid visual noise) ---
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.015)';
+      // --- Subtle Grid (Subtle but sharp grid lines) ---
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.025)';
       ctx.lineWidth = 1;
       const gridSize = 50;
       // Grid coordinates mapped based on panning
@@ -739,37 +660,29 @@ export default function VisualizerCanvas() {
 
         ctx.save();
         
-        // Dim opacity slightly for out-of-focus elements
-        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
-        let opacityTarget = n.opacity.current;
-        if (hasActiveFocus && !isFocused) {
-          opacityTarget *= 0.55; // Dim out-of-focus elements
-        }
-        ctx.globalAlpha = opacityTarget;
+        // Keep elements crisp and sharp (no active focus dimming on card bg)
+        ctx.globalAlpha = n.opacity.current;
 
-        // Draw shadow glow for focused elements
+        // Draw solid background
+        ctx.fillStyle = '#1E293B';
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 8); // Sharper corner radius
+        ctx.fill();
+
+        // High contrast border without shadow glow blur
         if (isFocused) {
-          ctx.shadowColor = theme.glow;
-          ctx.shadowBlur = 15;
           ctx.strokeStyle = theme.border;
-          ctx.lineWidth = 2.5;
+          ctx.lineWidth = 2.0;
         } else {
-          ctx.shadowBlur = 0;
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+          ctx.strokeStyle = '#334155';
           ctx.lineWidth = 1.2;
         }
-
-        // Draw glassmorphism background
-        ctx.fillStyle = n.type === 'frame' ? 'rgba(15, 23, 42, 0.75)' : theme.bg;
-        ctx.beginPath();
-        ctx.roundRect(x, y, w, h, 12);
-        ctx.fill();
         ctx.stroke();
 
         // Draw a clean accent colored bar on the left
         ctx.fillStyle = theme.accent;
         ctx.beginPath();
-        ctx.roundRect(x + 1, y + 6, 4, h - 12, 2);
+        ctx.roundRect(x + 1, y + 6, 4, h - 12, 1.5);
         ctx.fill();
 
         ctx.restore();
@@ -806,8 +719,7 @@ export default function VisualizerCanvas() {
         drawCard(node, cardTheme, isFocused || isHoverHighlight || isSelected);
 
         ctx.save();
-        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
-        ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+        ctx.globalAlpha = node.opacity.current;
 
         // Variable Name
         ctx.fillStyle = '#F8FAFC';
@@ -851,17 +763,17 @@ export default function VisualizerCanvas() {
 
             // Previous value fading out
             ctx.fillStyle = '#EF4444';
-            ctx.globalAlpha = node.opacity.current * (1 - progress * 0.5) * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+            ctx.globalAlpha = node.opacity.current * (1 - progress * 0.5);
             ctx.fillText(prevText, drawX + prevW, textY);
 
             // Arrow
             ctx.fillStyle = '#94A3B8';
-            ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+            ctx.globalAlpha = node.opacity.current;
             ctx.fillText(arrow, drawX + prevW + arrowW, textY);
 
             // New value fading in
             ctx.fillStyle = '#10B981';
-            ctx.globalAlpha = node.opacity.current * (0.5 + progress * 0.5) * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+            ctx.globalAlpha = node.opacity.current * (0.5 + progress * 0.5);
             ctx.fillText(nextText, drawX + prevW + arrowW + nextW, textY);
           } else {
             ctx.fillStyle = '#FFFFFF';
@@ -890,8 +802,7 @@ export default function VisualizerCanvas() {
         drawCard(node, theme, isActive || isSelected);
 
         ctx.save();
-        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
-        ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isActive && !isSelected ? 0.55 : 1);
+        ctx.globalAlpha = node.opacity.current;
 
         ctx.fillStyle = isActive || isSelected ? '#F8FAFC' : '#94A3B8';
         ctx.font = 'bold 13px Inter';
@@ -939,8 +850,7 @@ export default function VisualizerCanvas() {
         drawCard(node, cardTheme, isFocused || isHoverHighlight || isSelected);
 
         ctx.save();
-        const hasActiveFocus = activeVarNames.size > 0 || activeHeapIds.size > 0;
-        ctx.globalAlpha = node.opacity.current * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+        ctx.globalAlpha = node.opacity.current;
 
         // Hex Address/ID
         ctx.fillStyle = theme.accent;
@@ -970,8 +880,8 @@ export default function VisualizerCanvas() {
               selectedItem.name === `${obj.id}[${idx}]`;
 
             // Draw box slot
-            ctx.fillStyle = 'rgba(15, 23, 42, 0.6)';
-            ctx.strokeStyle = isSlotSelected ? '#F59E0B' : 'rgba(255, 255, 255, 0.08)';
+            ctx.fillStyle = '#0F172A';
+            ctx.strokeStyle = isSlotSelected ? '#F59E0B' : '#334155';
             ctx.lineWidth = isSlotSelected ? 2 : 1;
             ctx.beginPath();
             ctx.roundRect(slotX, slotY, slotWidth, slotHeight, 6);
@@ -1006,13 +916,13 @@ export default function VisualizerCanvas() {
             if (flashProgress < 1 && flash && flash.oldValue !== valStr) {
               ctx.save();
               ctx.fillStyle = '#EF4444';
-              ctx.globalAlpha = node.opacity.current * (1 - flashProgress) * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+              ctx.globalAlpha = node.opacity.current * (1 - flashProgress);
               ctx.fillText(flash.oldValue, textX, textY - 6);
               ctx.restore();
 
               ctx.save();
               ctx.fillStyle = '#10B981';
-              ctx.globalAlpha = node.opacity.current * flashProgress * (hasActiveFocus && !isFocused && !isHoverHighlight && !isSelected ? 0.55 : 1);
+              ctx.globalAlpha = node.opacity.current * flashProgress;
               ctx.fillText(valStr, textX, textY + 6);
               ctx.restore();
             } else {
@@ -1024,8 +934,8 @@ export default function VisualizerCanvas() {
 
           if (hasMore) {
             const slotX = x + 16 + maxSlots * (slotWidth + 6);
-            ctx.fillStyle = 'rgba(15, 23, 42, 0.3)';
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.fillStyle = '#0F172A';
+            ctx.strokeStyle = '#334155';
             ctx.beginPath();
             ctx.roundRect(slotX, slotY, slotWidth, slotHeight, 6);
             ctx.fill();
@@ -1037,7 +947,7 @@ export default function VisualizerCanvas() {
           }
         } else if (obj.value && typeof obj.value === 'object') {
           // Struct/Object key-value properties
-          ctx.font = '12px JetBrains Mono';
+          ctx.font = 'bold 12px JetBrains Mono';
           let fieldY = y + 54;
           const valObj = obj.value as Record<string, unknown>;
           Object.keys(valObj).forEach((key) => {
@@ -1317,9 +1227,6 @@ export default function VisualizerCanvas() {
     setAutoFit(false);
   };
 
-  // Recent changes
-  const recentChanges = getMemoryHistory(steps, currentStepIndex);
-
   return (
     <div 
       ref={containerRef}
@@ -1338,7 +1245,7 @@ export default function VisualizerCanvas() {
 
       {/* Floating Canvas UI Controls: Playback, Auto-Fit Toggle, Speed Dropdown */}
       <div className="absolute top-4 left-4 flex items-center space-x-2 z-20">
-        <div className="flex items-center space-x-2 bg-slate-950/85 border border-slate-800/60 rounded-full p-1.5 backdrop-blur-md shadow-lg">
+        <div className="flex items-center space-x-2 bg-slate-950 border border-slate-800 rounded-full p-1.5 shadow-lg">
           {/* Previous Button */}
           <button
             onClick={stepBackward}
@@ -1442,7 +1349,7 @@ export default function VisualizerCanvas() {
 
       {/* Top Center: Floating Compressed "Current Action" Banner */}
       {steps.length > 0 && currentStepIndex < steps.length && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center bg-slate-950/90 border border-slate-800/80 rounded-full px-5 py-2 z-20 backdrop-blur-md shadow-2xl animate-scale-up border-b-blue-500/40">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center bg-slate-950 border border-slate-800 rounded-full px-5 py-2 z-20 shadow-2xl animate-scale-up border-b-blue-500/40">
           <p className="text-xs font-bold text-slate-100 font-mono tracking-wider">
             L{steps[currentStepIndex].lineNumber} &bull; {steps[currentStepIndex].operation.replace('_', ' ').toUpperCase()}
           </p>
@@ -1450,7 +1357,7 @@ export default function VisualizerCanvas() {
       )}
 
       {/* Top Right: Reset and Zoom Controls */}
-      <div className="absolute top-4 right-4 flex items-center space-x-2 bg-slate-950/85 border border-slate-800/60 rounded-full p-1.5 z-20 backdrop-blur-md shadow-lg">
+      <div className="absolute top-4 right-4 flex items-center space-x-2 bg-slate-950 border border-slate-800 rounded-full p-1.5 z-20 shadow-lg">
         <button 
           onClick={resetView}
           title="Reset Camera"
@@ -1466,36 +1373,9 @@ export default function VisualizerCanvas() {
         </span>
       </div>
 
-      {/* Bottom Left: Memory Timeline Overlay */}
-      {recentChanges.length > 0 && (
-        <div className="absolute bottom-4 left-4 flex flex-col space-y-2 bg-slate-950/90 border border-slate-800/70 rounded-xl p-3.5 z-20 backdrop-blur-md shadow-2xl w-60 animate-slide-up border-l-emerald-500/40">
-          <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-800/80 pb-1.5">
-            Memory History
-          </h4>
-          <div className="flex flex-col space-y-2 pt-1 font-mono text-xs">
-            {recentChanges.map((change, idx) => (
-              <div key={idx} className="flex flex-col space-y-1 bg-slate-900/40 p-2 rounded-lg border border-slate-800/40">
-                <div className="flex justify-between items-center text-[9px] text-slate-500">
-                  <span>Line {change.line}</span>
-                  <span className="text-[8px] uppercase tracking-wide bg-emerald-500/10 text-emerald-400 px-1 py-0.5 rounded font-sans font-bold border border-emerald-500/10">
-                    Write
-                  </span>
-                </div>
-                <div className="flex items-center space-x-1.5 flex-wrap">
-                  <span className="font-bold text-slate-200">{change.name}</span>
-                  <span className="text-red-400 line-through text-[11px]">{change.oldValue}</span>
-                  <span className="text-slate-500">→</span>
-                  <span className="text-emerald-400 font-bold">{change.newValue}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Interactive Input Overlay (dim background, slide-up modal) */}
       {awaitingInput && (
-        <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-6 z-30 animate-fade-in">
+        <div className="absolute inset-0 bg-slate-950/85 flex items-center justify-center p-6 z-30 animate-fade-in">
           <form 
             onSubmit={handleInputSubmit}
             className="w-full max-w-sm bg-slate-900 border border-blue-500/35 rounded-xl p-5 shadow-2xl shadow-blue-500/10 flex flex-col space-y-4 animate-scale-up"
@@ -1539,7 +1419,7 @@ export default function VisualizerCanvas() {
 
       {/* Before Execution Overlay */}
       {steps.length === 0 && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm z-30 animate-fade-in p-6">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/85 z-30 animate-fade-in p-6">
           <div className="text-center max-w-sm bg-slate-900 border border-slate-850 p-8 rounded-2xl shadow-2xl flex flex-col items-center space-y-4">
             <div className="w-12 h-12 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 mb-1">
               <Play size={20} fill="currentColor" className="ml-0.5" />

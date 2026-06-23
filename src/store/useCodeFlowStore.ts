@@ -226,6 +226,10 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
         explanationsMap[idx] = exp;
       });
 
+      console.log("=== PROCESSED EXPLANATIONS ===");
+      console.log(explanationsMap);
+      console.log("==============================");
+
       set({
         explanations: explanationsMap,
         explanationsLoading: false

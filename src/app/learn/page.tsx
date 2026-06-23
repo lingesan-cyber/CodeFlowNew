@@ -1,12 +1,96 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Navbar from '../../components/Navbar';
 import Editor from '../../components/editor/Editor';
 import VisualizerCanvas from '../../components/visualizer/VisualizerCanvas';
 import AIPanel from '../../components/ai/AIPanel';
 import { useCodeFlowStore } from '../../store/useCodeFlowStore';
 import { Terminal, Sparkles } from 'lucide-react';
+import { ExecutionStep } from '../../engine/types';
+
+interface HistoryEntry {
+  stepIndex: number;
+  line: number;
+  name: string;
+  oldValue: string;
+  newValue: string;
+}
+
+const getChangeIndicator = (name: string, newValue: string, oldValue: string) => {
+  if (newValue.startsWith('0x') || newValue.startsWith('&') || oldValue.startsWith('0x')) {
+    return { symbol: '🔗', color: 'text-cyan-400' };
+  }
+  if (name.includes('[') || name.includes('.')) {
+    return { symbol: '●', color: 'text-emerald-500' };
+  }
+  return { symbol: '✎', color: 'text-amber-400' };
+};
+
+const getMemoryHistory = (steps: ExecutionStep[], currentIndex: number): HistoryEntry[] => {
+  const history: HistoryEntry[] = [];
+  
+  for (let i = 1; i <= currentIndex; i++) {
+    if (i >= steps.length) break;
+    const prevStep = steps[i - 1];
+    const currStep = steps[i];
+    
+    // Check variables that changed
+    currStep.variables.forEach(v => {
+      const prevV = prevStep.variables.find(pv => pv.name === v.name && pv.scope === v.scope);
+      const oldVal = prevV ? (prevV.value === null ? 'null' : String(prevV.value)) : 'undefined';
+      const newVal = v.value === null ? 'null' : String(v.value);
+      if (oldVal !== newVal) {
+        history.push({
+          stepIndex: i,
+          line: currStep.lineNumber,
+          name: v.name,
+          oldValue: oldVal,
+          newValue: newVal
+        });
+      }
+    });
+
+    // Check heap objects that changed
+    currStep.heap.forEach(h => {
+      const prevH = prevStep.heap.find(ph => ph.id === h.id);
+      if (prevH) {
+        const hArr = h.value as unknown[];
+        const prevArr = prevH.value as unknown[];
+        if (Array.isArray(hArr) && Array.isArray(prevArr)) {
+          hArr.forEach((val, idx) => {
+            const oldVal = prevArr[idx];
+            if (oldVal !== val) {
+              history.push({
+                stepIndex: i,
+                line: currStep.lineNumber,
+                name: `${h.id}[${idx}]`,
+                oldValue: oldVal === null ? 'null' : String(oldVal),
+                newValue: val === null ? 'null' : String(val)
+              });
+            }
+          });
+        } else if (typeof h.value === 'object' && typeof prevH.value === 'object' && h.value && prevH.value) {
+          const currVal = h.value as Record<string, unknown>;
+          const prevVal = prevH.value as Record<string, unknown>;
+          Object.keys(currVal).forEach(key => {
+            if (currVal[key] !== prevVal[key]) {
+              history.push({
+                stepIndex: i,
+                line: currStep.lineNumber,
+                name: `${h.id}.${key}`,
+                oldValue: prevVal[key] === undefined ? 'undefined' : String(prevVal[key]),
+                newValue: String(currVal[key])
+              });
+            }
+          });
+        }
+      }
+    });
+  }
+
+  return history.slice().reverse();
+};
 
 export default function LearnIDE() {
   const {
@@ -26,6 +110,29 @@ export default function LearnIDE() {
     jumpToStart,
     jumpToEnd
   } = useCodeFlowStore();
+
+  const [userSelectedTab, setUserSelectedTab] = useState<'execution' | 'memory' | 'output' | null>(null);
+
+  // Reset user selection when steps change (e.g. new compilation run)
+  const prevStepsLengthRef = useRef(0);
+  useEffect(() => {
+    if (steps.length !== prevStepsLengthRef.current) {
+      setUserSelectedTab(null);
+    }
+    prevStepsLengthRef.current = steps.length;
+  }, [steps.length]);
+
+  // Reset user selection when execution finishes
+  const prevPlaybackStateRef = useRef(playbackState);
+  useEffect(() => {
+    if (playbackState === 'finished' && prevPlaybackStateRef.current !== 'finished') {
+      setUserSelectedTab(null);
+    }
+    prevPlaybackStateRef.current = playbackState;
+  }, [playbackState]);
+
+  // Derive the active tab based on playbackState and userSelectedTab
+  const activeTab = userSelectedTab || (playbackState === 'finished' ? 'output' : 'execution');
 
   // Playback timer loop
   useEffect(() => {
@@ -121,102 +228,296 @@ export default function LearnIDE() {
             
             {/* Visualizer Canvas */}
             <VisualizerCanvas />
-
-            {/* Bottom Console panel */}
-            <div className="h-[220px] bg-slate-900 border border-slate-800/80 rounded-xl flex flex-col overflow-hidden shrink-0 shadow-lg">
-              <div className="px-4 py-1.5 bg-slate-950 border-b border-slate-850 flex items-center justify-between text-slate-400">
-                <div className="flex items-center space-x-1.5">
-                  <Terminal size={12} />
-                  <span className="text-[10px] font-bold uppercase tracking-wider">
-                    {steps.length === 0 ? 'Stdout Console' : (currentStepIndex < steps.length - 1 ? 'Live Execution Monitor' : 'Program Output')}
-                  </span>
-                </div>
-                {steps.length > 0 && (
-                  <span className="text-[9px] font-mono text-slate-500 uppercase">
-                    Step {currentStepIndex + 1} of {steps.length}
-                  </span>
-                )}
-              </div>
-              
-              <div className="flex-1 flex overflow-hidden bg-slate-950/70 text-xs font-mono select-text">
-                {steps.length === 0 ? (
-                  // Initial Idle State
-                  <div className="flex-1 p-3 text-slate-500">
-                    Console output will appear here when the program prints...
-                  </div>
-                ) : currentStepIndex < steps.length - 1 ? (
-                  // Running / Stepping State
-                  (() => {
-                    const currentStep = steps[currentStepIndex];
-                    const explanationText = explanations[currentStepIndex];
-                    const hasStdout = stdout && stdout.trim().length > 0;
-                    
-                    const splitDescription = (desc: string) => {
-                      const idx = desc.indexOf(':');
-                      if (idx !== -1) {
-                        return {
-                          title: desc.substring(0, idx).trim() + ':',
-                          detail: desc.substring(idx + 1).trim()
-                        };
-                      }
-                      return { title: desc, detail: '' };
-                    };
-                    
-                    const descParts = splitDescription(currentStep.description);
-
-                    const renderExplanationColumn = () => (
-                      <div className="flex-1 p-3 flex flex-col min-w-0">
-                        <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Execution Explanation</span>
-                        <div className="flex-1 overflow-y-auto">
-                          <div className="text-base font-bold text-blue-400">Line {currentStep.lineNumber}</div>
-                          <div className="mt-2 text-xs font-semibold text-slate-300">
-                            {descParts.title}
-                          </div>
-                          {descParts.detail && (
-                            <div className="mt-1 text-sm font-mono text-slate-100 font-bold">
-                              {descParts.detail}
-                            </div>
-                          )}
-                          {explanationText && (
-                            <div className="border-t border-slate-800/80 pt-2 mt-3 text-slate-400 text-[11px] leading-relaxed">
-                              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-1">AI Explanation</span>
-                              {explanationText}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-
-                    if (hasStdout) {
-                      return (
-                        <div className="flex-1 flex divide-x divide-slate-800/80">
-                          {/* Left Column: Explanation */}
-                          {renderExplanationColumn()}
-                          {/* Right Column: Accumulated Output */}
-                          <div className="flex-1 p-3 flex flex-col min-w-0 bg-slate-950/20">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Program Output</span>
-                            <pre className="flex-1 overflow-y-auto text-emerald-400 leading-relaxed whitespace-pre-wrap select-text">
-                              {stdout}
-                            </pre>
-                          </div>
-                        </div>
-                      );
-                    } else {
-                      return renderExplanationColumn();
-                    }
-                  })()
-                ) : (
-                  // Completed State
-                  <div className="flex-1 p-3 flex flex-col min-w-0">
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Program Output</span>
-                    <pre className="flex-1 overflow-y-auto text-emerald-400 leading-relaxed whitespace-pre-wrap select-text">
-                      {stdout || '(No program output)'}
-                    </pre>
-                  </div>
-                )}
-              </div>
-            </div>
             
+            {/* Bottom Console panel */}
+            {(() => {
+              const isRunning = steps.length > 0 && playbackState !== 'finished';
+              return (
+                <div className="h-[220px] bg-slate-900 border border-slate-800/80 rounded-xl flex flex-col overflow-hidden shrink-0 shadow-lg">
+                  <div className="bg-slate-950 border-b border-slate-850 flex items-center justify-between px-4 py-1.5 select-none">
+                    <div className="flex items-center space-x-1.5 text-slate-400">
+                      <Terminal size={12} className="text-slate-500" />
+                      
+                      {isRunning ? (
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                          Execution Monitor
+                        </span>
+                      ) : (
+                        /* Tabs */
+                        <div className="flex items-center space-x-1 bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[10px] font-bold">
+                          <button
+                            onClick={() => {
+                              setUserSelectedTab('execution');
+                            }}
+                            className={`px-3 py-1 rounded transition-colors cursor-pointer ${
+                              activeTab === 'execution'
+                                ? 'bg-blue-600 text-white'
+                                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                            }`}
+                          >
+                            Execution
+                          </button>
+                          <button
+                            onClick={() => {
+                              setUserSelectedTab('memory');
+                            }}
+                            className={`px-3 py-1 rounded transition-colors cursor-pointer ${
+                              activeTab === 'memory'
+                                ? 'bg-blue-600 text-white'
+                                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                            }`}
+                          >
+                            Memory History ({getMemoryHistory(steps, steps.length - 1).length})
+                          </button>
+                          <button
+                            onClick={() => {
+                              setUserSelectedTab('output');
+                            }}
+                            className={`px-3 py-1 rounded transition-colors cursor-pointer ${
+                              activeTab === 'output'
+                                ? 'bg-blue-600 text-white'
+                                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                            }`}
+                          >
+                            Program Output
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    
+                    {steps.length > 0 && (
+                      <span className="text-[9px] font-mono text-slate-500 uppercase">
+                        Step {currentStepIndex + 1} of {steps.length}
+                      </span>
+                    )}
+                  </div>
+                  
+                  <div className="flex-1 flex overflow-hidden bg-slate-950/70 text-xs font-mono select-text">
+                        {isRunning ? (
+                      (() => {
+                        const currentStep = steps[currentStepIndex];
+                        const explanationText = explanations[currentStepIndex];
+                        console.log("=== FINAL UI VALUE (AI Explanation - Active Execution) ===");
+                        console.log(`Step ${currentStepIndex} (Line ${currentStep?.lineNumber}):`, explanationText);
+                        console.log("=========================================================");
+                        
+                        const splitDescription = (desc: string) => {
+                          if (!desc) return { title: '', detail: '' };
+                          const idx = desc.indexOf(':');
+                          if (idx !== -1) {
+                            return {
+                              title: desc.substring(0, idx).trim() + ':',
+                              detail: desc.substring(idx + 1).trim()
+                            };
+                          }
+                          return { title: desc, detail: '' };
+                        };
+                        
+                        const descParts = currentStep ? splitDescription(currentStep.description) : { title: '', detail: '' };
+                        const hasStdout = stdout && stdout.trim().length > 0;
+                        const recentChanges = getMemoryHistory(steps, currentStepIndex);
+                        
+                        return (
+                          <div className="flex-1 flex flex-row min-h-0 overflow-hidden divide-x divide-slate-800/80">
+                            {/* Left Section (75% width, flex-[3]) */}
+                            <div className="flex-[3] flex flex-col min-h-0 overflow-hidden min-w-0">
+                              {/* A: Execution Explanation */}
+                              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                                {hasStdout && (
+                                  <div className="px-4 py-1.5 bg-slate-900/80 border-b border-slate-850 text-[9px] font-bold text-slate-400 uppercase tracking-wider select-none shrink-0">
+                                    Execution Explanation
+                                  </div>
+                                )}
+                                <div className="flex-1 overflow-y-auto p-3 pr-1 custom-scrollbar">
+                                  <div className="text-base font-bold text-blue-400">Line {currentStep.lineNumber}</div>
+                                  <div className="mt-1.5 text-xs font-semibold text-slate-300">
+                                    {descParts.title}
+                                  </div>
+                                  {descParts.detail && (
+                                    <div className="mt-1 text-sm font-mono text-slate-100 font-bold">
+                                      {descParts.detail}
+                                    </div>
+                                  )}
+                                  {explanationText && (
+                                    <div className="border-t border-slate-800/80 pt-2 mt-2 text-slate-400 text-[11px] leading-relaxed">
+                                      <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-0.5 select-none">AI Explanation</span>
+                                      {explanationText}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* B: Program Output Divider and Content */}
+                              {hasStdout && (
+                                <div className="flex-1 flex flex-col min-h-0 overflow-hidden shrink-0 border-t border-slate-800/80">
+                                  {/* Output Section Divider */}
+                                  <div className="bg-slate-950 px-4 py-1.5 flex flex-col items-center justify-center select-none shrink-0 border-b border-slate-850 text-center font-bold text-[9px] uppercase tracking-wider text-slate-400">
+                                    <span className="text-slate-600 block leading-none select-none tracking-widest">━━━━━━━━━━━━━━━━━━━━</span>
+                                    <span className="text-slate-300 block py-0.5 leading-none select-none">Program Output</span>
+                                    <span className="text-slate-600 block leading-none select-none tracking-widest">━━━━━━━━━━━━━━━━━━━━</span>
+                                  </div>
+                                  <div className="flex-1 overflow-y-auto p-3 pr-1 custom-scrollbar">
+                                    <pre className="text-emerald-400 leading-relaxed text-xs whitespace-pre-wrap select-text">
+                                      {stdout}
+                                    </pre>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Right Section (25% width, flex-[1]) */}
+                            <div className="flex-[1] flex flex-col min-h-0 overflow-hidden min-w-0 bg-slate-950/20">
+                              <div className="bg-slate-950 border-b border-slate-850 px-4 py-1.5 flex items-center justify-between shrink-0 select-none">
+                                <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">
+                                  Recent Changes ({recentChanges.length})
+                                </span>
+                              </div>
+                              
+                              <div className="flex-1 overflow-y-auto p-3 pr-1 custom-scrollbar space-y-0.5 bg-slate-950/45">
+                                {recentChanges.length === 0 ? (
+                                  <div className="p-3 text-slate-500 text-[10px] font-mono select-none">
+                                    No variables modified yet.
+                                  </div>
+                                ) : (
+                                  recentChanges.map((change, idx) => {
+                                    return (
+                                      <div key={idx} className="flex items-center text-[13px] font-mono py-1 px-1.5 hover:bg-slate-900/40 rounded transition-colors select-text">
+                                        <span className="text-slate-500 w-11 shrink-0">L{change.line}</span>
+                                        <span className="text-slate-200 font-semibold w-16 truncate mr-1.5" title={change.name}>
+                                          {change.name}
+                                        </span>
+                                        <div className="flex items-center space-x-1 text-slate-400 truncate flex-1 min-w-0">
+                                          {change.oldValue !== 'undefined' && (
+                                            <span className="text-red-400/85 line-through truncate max-w-[42px]" title={change.oldValue}>
+                                              {change.oldValue}
+                                            </span>
+                                          )}
+                                          {change.oldValue !== 'undefined' && <span className="text-slate-600 text-[10px]">&rarr;</span>}
+                                          <span className="text-emerald-400 font-bold truncate max-w-[55px]" title={change.newValue}>
+                                            {change.newValue}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()
+                    ) : activeTab === 'execution' ? (
+                      steps.length === 0 ? (
+                        <div className="flex-1 p-3 text-slate-500">
+                          Compile and Run code to view live statement-by-statement execution tracking...
+                        </div>
+                      ) : (
+                        (() => {
+                          const currentStep = steps[currentStepIndex];
+                          const explanationText = explanations[currentStepIndex];
+                          console.log("=== FINAL UI VALUE (AI Explanation - Execution Tab) ===");
+                          console.log(`Step ${currentStepIndex} (Line ${currentStep?.lineNumber}):`, explanationText);
+                          console.log("=====================================================");
+                          
+                          const splitDescription = (desc: string) => {
+                            const idx = desc.indexOf(':');
+                            if (idx !== -1) {
+                              return {
+                                title: desc.substring(0, idx).trim() + ':',
+                                detail: desc.substring(idx + 1).trim()
+                              };
+                            }
+                            return { title: desc, detail: '' };
+                          };
+                          
+                          const descParts = splitDescription(currentStep.description);
+                          
+                          return (
+                            <div className="flex-1 p-3 flex flex-col min-w-0">
+                              <div className="flex-1 overflow-y-auto pr-1 custom-scrollbar">
+                                <div className="text-base font-bold text-blue-400">Line {currentStep.lineNumber}</div>
+                                <div className="mt-2 text-xs font-semibold text-slate-300">
+                                  {descParts.title}
+                                </div>
+                                {descParts.detail && (
+                                  <div className="mt-1 text-sm font-mono text-slate-100 font-bold">
+                                    {descParts.detail}
+                                  </div>
+                                )}
+                                {explanationText && (
+                                  <div className="border-t border-slate-800/80 pt-2 mt-3 text-slate-400 text-[11px] leading-relaxed">
+                                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-1">AI Explanation</span>
+                                    {explanationText}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()
+                      )
+                    ) : activeTab === 'memory' ? (
+                      steps.length === 0 ? (
+                        <div className="flex-1 p-3 text-slate-500">
+                          Compile and Run code to see the step-by-step memory timeline...
+                        </div>
+                      ) : (
+                        (() => {
+                          const recentChanges = getMemoryHistory(steps, currentStepIndex);
+                          if (recentChanges.length === 0) {
+                            return (
+                              <div className="flex-1 p-3 text-slate-500">
+                                No variables have been modified or allocated yet.
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="flex-1 p-3 flex flex-col min-w-0">
+                              <div className="flex-1 overflow-y-auto pr-1 custom-scrollbar space-y-0.5">
+                                {recentChanges.map((change, idx) => {
+                                  const indicator = getChangeIndicator(change.name, change.newValue, change.oldValue);
+                                  return (
+                                    <div key={idx} className="flex items-center text-[10.5px] font-mono py-1 px-2 hover:bg-slate-900/40 rounded transition-colors select-text">
+                                      <span className="text-slate-500 w-16 shrink-0">Line {change.line}</span>
+                                      <span className={`w-5 shrink-0 text-center mr-1 text-[10px] ${indicator.color}`} title={indicator.symbol === '🔗' ? 'Reference Update' : indicator.symbol === '●' ? 'Write Operation' : 'Variable Update'}>
+                                        {indicator.symbol}
+                                      </span>
+                                      <span className="text-slate-200 font-semibold w-32 truncate mr-3" title={change.name}>
+                                        {change.name}
+                                      </span>
+                                      <div className="flex items-center space-x-2 text-slate-400 truncate flex-1 min-w-0">
+                                        {change.oldValue !== 'undefined' && (
+                                          <span className="text-red-400/80 line-through truncate max-w-[80px]" title={change.oldValue}>
+                                            {change.oldValue}
+                                          </span>
+                                        )}
+                                        {change.oldValue !== 'undefined' && <span className="text-slate-600">→</span>}
+                                        <span className="text-emerald-400 font-bold truncate" title={change.newValue}>
+                                          {change.newValue}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()
+                      )
+                    ) : steps.length === 0 ? (
+                      <div className="flex-1 p-3 text-slate-500">
+                        Console output will appear here when the program prints...
+                      </div>
+                    ) : (
+                      <div className="flex-1 p-3 flex flex-col min-w-0">
+                        <pre className="flex-1 overflow-y-auto text-emerald-400 leading-relaxed text-xs whitespace-pre-wrap select-text pr-1 custom-scrollbar">
+                          {stdout || '(No program output)'}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
 

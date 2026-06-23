@@ -3,6 +3,7 @@ import {
   AIRequest, AIResponse, AIFeature, AIProvider, 
   AIProviderConfig
 } from './types';
+import { buildPrompt } from './prompts';
 
 // Load config from environment variables once
 function loadConfig(): AIProviderConfig {
@@ -43,8 +44,23 @@ export async function generateExplanation(request: AIRequest): Promise<AIRespons
     return createFallbackResponse(request, 'AI explanations disabled');
   }
   try {
-    return await getAdapter().generate(request);
+    const prompt = buildPrompt(request);
+    console.log("=== AI PROMPT SENT (explain_step) ===");
+    console.log("System:", prompt.system);
+    console.log("User:", prompt.user);
+    console.log("=====================================");
+
+    const response = await getAdapter().generate(request);
+
+    console.log("=== RAW AI RESPONSE (explain_step) ===");
+    console.log(response.explanation);
+    console.log("======================================");
+
+    return response;
   } catch (e) {
+    console.error("=== AI EXPLANATION ERROR (explain_step) ===");
+    console.error(e);
+    console.log("===========================================");
     return createFallbackResponse(request, e instanceof Error ? e.message : 'Unknown error');
   }
 }
@@ -87,8 +103,23 @@ export async function generateBatchExplanations(request: AIRequest): Promise<AIR
     return createFallbackResponse(request, 'AI batch explanations disabled');
   }
   try {
-    return await getAdapter().generate({ ...request, feature: 'explain_batch' });
+    const prompt = buildPrompt(request);
+    console.log("=== AI PROMPT SENT (explain_batch) ===");
+    console.log("System:", prompt.system);
+    console.log("User:", prompt.user);
+    console.log("======================================");
+
+    const response = await getAdapter().generate({ ...request, feature: 'explain_batch' });
+
+    console.log("=== RAW AI RESPONSE (explain_batch) ===");
+    console.log(response.explanation);
+    console.log("=======================================");
+
+    return response;
   } catch (e) {
+    console.error("=== AI EXPLANATION ERROR (explain_batch) ===");
+    console.error(e);
+    console.log("=============================================");
     return createFallbackResponse(request, e instanceof Error ? e.message : 'Unknown error');
   }
 }
@@ -128,7 +159,7 @@ export function isFeatureEnabled(feature: AIFeature): boolean {
 function createFallbackResponse(request: AIRequest, reason: string): AIResponse {
   if (request.feature === 'explain_batch') {
     const trace = request.trace || [];
-    const explanations = trace.map(s => `${s.description}`);
+    const explanations = trace.map(() => '[AI unavailable]');
     return {
       explanation: JSON.stringify(explanations),
       confidence: 'low',
@@ -140,7 +171,7 @@ function createFallbackResponse(request: AIRequest, reason: string): AIResponse 
   }
 
   const fallbacks: Record<Exclude<AIFeature, 'explain_batch'>, string> = {
-    explain_step: `The program is executing: ${request.context.operation} at line ${request.context.lineNumber}.`,
+    explain_step: '[AI unavailable]',
     explain_error: `Error occurred: ${request.context.error?.message || 'Unknown error'}`,
     hint: 'Try tracing the variables step by step.',
     quiz: 'What will be the value of the main variable after this step?',

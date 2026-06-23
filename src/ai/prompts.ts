@@ -71,6 +71,7 @@ Task: Explain each step of the execution trace in 1-2 simple sentences.
 Format: Return a JSON array of strings, where each element is the explanation for the corresponding step index in the provided trace. Example format: ["Explanation for step 0", "Explanation for step 1", ...]
 Rules:
 * The response MUST be a valid JSON array of strings. Do not wrap it in markdown block like \`\`\`json. Return ONLY the raw JSON.
+* The JSON array MUST contain EXACTLY the same number of elements as the steps in the Trace list (which is ${request.trace?.length || 0} steps). Each index in the JSON array must correspond to the step at the same index in the Trace.
 * Keep each step's explanation very concise (max 25 words).
 * Use analogies where helpful (boxes, labels, containers).`;
 
