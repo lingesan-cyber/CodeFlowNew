@@ -65,39 +65,6 @@ User Query: ${request.userMessage}`;
     };
   }
 
-  if (request.feature === 'explain_batch') {
-    const system = `You are a patient programming tutor explaining code execution to a complete beginner.
-Task: Explain each step of the execution trace in 1-2 simple sentences.
-Format: Return a JSON array of strings, where each element is the explanation for the corresponding step index in the provided trace. Example format: ["Explanation for step 0", "Explanation for step 1", ...]
-Rules:
-* The response MUST be a valid JSON array of strings. Do not wrap it in markdown block like \`\`\`json. Return ONLY the raw JSON.
-* The JSON array MUST contain EXACTLY the same number of elements as the steps in the Trace list (which is ${request.trace?.length || 0} steps). Each index in the JSON array must correspond to the step at the same index in the Trace.
-* Keep each step's explanation very concise (max 25 words).
-* Use analogies where helpful (boxes, labels, containers).`;
-
-    const stepsInfo = request.trace?.map(s => ({
-      step: s.stepNumber,
-      line: s.lineNumber,
-      op: s.operation,
-      desc: s.description,
-      vars: s.variables.map(v => `${v.name}=${v.value}`).join(', '),
-      stack: s.callStack.map(f => f.functionName).join(' > ')
-    }));
-
-    const user = `Language: ${request.language}
-Code:
-${request.context.code}
-
-Trace:
-${JSON.stringify(stepsInfo, null, 2)}`;
-
-    return {
-      system,
-      user,
-      maxTokens: Math.max(400, (request.trace?.length || 0) * 100),
-      temperature: 0.2
-    };
-  }
 
   const baseSystem = `You are a patient programming tutor explaining code execution to a complete beginner.
 Task: ${getTaskDescription(request.feature)}

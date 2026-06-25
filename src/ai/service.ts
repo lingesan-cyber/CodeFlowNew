@@ -12,14 +12,14 @@ function loadConfig(): AIProviderConfig {
   const model = process.env.AI_MODEL || 'qwen2.5-coder:7b';
   const baseUrl = process.env.AI_BASE_URL || 'http://localhost:11434';
   const apiKey = process.env.AI_API_KEY;
-  const timeoutMs = parseInt(process.env.AI_TIMEOUT_MS || '10000', 10);
+  const timeoutMs = 45000; // Increased timeout to 45000ms
   const maxTokens = parseInt(process.env.AI_MAX_TOKENS || '150', 10);
   const temperature = parseFloat(process.env.AI_TEMPERATURE || '0.3');
 
   // Parse enabled features
-  const allFeatures: AIFeature[] = ['explain_step', 'explain_error', 'hint', 'quiz', 'explain_batch', 'chat'];
+  const allFeatures: AIFeature[] = ['explain_step', 'explain_error', 'hint', 'quiz', 'chat'];
   const enabledFeatures = allFeatures.filter(f => 
-    process.env[`AI_ENABLE_${f.toUpperCase()}`] !== 'false'
+    f === 'explain_step' || f === 'chat' || process.env[`AI_ENABLE_${f.toUpperCase()}`] !== 'false'
   );
 
   return { name: provider, model, baseUrl, apiKey, timeoutMs, maxTokens, temperature, enabledFeatures };
@@ -98,31 +98,6 @@ export async function generateQuiz(request: AIRequest): Promise<AIResponse> {
   }
 }
 
-export async function generateBatchExplanations(request: AIRequest): Promise<AIResponse> {
-  if (!isFeatureEnabled('explain_batch')) {
-    return createFallbackResponse(request, 'AI batch explanations disabled');
-  }
-  try {
-    const prompt = buildPrompt(request);
-    console.log("=== AI PROMPT SENT (explain_batch) ===");
-    console.log("System:", prompt.system);
-    console.log("User:", prompt.user);
-    console.log("======================================");
-
-    const response = await getAdapter().generate({ ...request, feature: 'explain_batch' });
-
-    console.log("=== RAW AI RESPONSE (explain_batch) ===");
-    console.log(response.explanation);
-    console.log("=======================================");
-
-    return response;
-  } catch (e) {
-    console.error("=== AI EXPLANATION ERROR (explain_batch) ===");
-    console.error(e);
-    console.log("=============================================");
-    return createFallbackResponse(request, e instanceof Error ? e.message : 'Unknown error');
-  }
-}
 
 export async function generateChatResponse(request: AIRequest): Promise<AIResponse> {
   if (!isFeatureEnabled('chat')) {
@@ -150,26 +125,18 @@ export function getCurrentProvider(): AIProvider {
   return (config || loadConfig()).name;
 }
 
+export function getCurrentModel(): string {
+  return (config || loadConfig()).model;
+}
+
 export function isFeatureEnabled(feature: AIFeature): boolean {
+  if (feature === 'explain_step' || feature === 'chat') return true;
   const cfg = config || loadConfig();
   return cfg.enabledFeatures.includes(feature);
 }
 
 // Fallback when AI is unavailable
 function createFallbackResponse(request: AIRequest, reason: string): AIResponse {
-  if (request.feature === 'explain_batch') {
-    const trace = request.trace || [];
-    const explanations = trace.map(() => '[AI unavailable]');
-    return {
-      explanation: JSON.stringify(explanations),
-      confidence: 'low',
-      generatedAt: new Date().toISOString(),
-      provider: 'fallback',
-      model: 'none',
-      latencyMs: 0
-    };
-  }
-
   const fallbacks: Record<Exclude<AIFeature, 'explain_batch'>, string> = {
     explain_step: '[AI unavailable]',
     explain_error: `Error occurred: ${request.context.error?.message || 'Unknown error'}`,

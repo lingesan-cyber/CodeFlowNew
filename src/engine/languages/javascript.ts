@@ -86,6 +86,16 @@ export class JSParser extends BaseParser {
       };
     }
 
+    // Break statement: break
+    if (t.type === 'KEYWORD' && t.value === 'break') {
+      const startToken = this.next();
+      if (this.match('PUNCTUATION', ';')) this.next();
+      return {
+        type: 'BreakStatement',
+        loc: this.getLoc(startToken)
+      };
+    }
+
     // Conditional: if (cond) { body } else { body }
     if (t.type === 'KEYWORD' && t.value === 'if') {
       const startToken = this.next();

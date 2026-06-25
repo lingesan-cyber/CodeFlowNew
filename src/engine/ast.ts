@@ -10,7 +10,8 @@ export type Statement =
   | ExpressionStatementNode
   | OutputNode
   | InputNode
-  | FreeNode;
+  | FreeNode
+  | BreakStatementNode;
 
 export type Expression =
   | LiteralNode
@@ -58,7 +59,7 @@ export interface ConditionalNode extends BaseNode {
 export interface LoopNode extends BaseNode {
   type: 'Loop';
   loopType: 'for' | 'while';
-  init?: Statement;
+  init?: Statement | Statement[];
   condition: Expression;
   update?: Statement;
   body: Statement[];
@@ -144,6 +145,7 @@ export interface FunctionCallNode extends BaseNode {
   type: 'FunctionCall';
   name: string;
   args: Expression[];
+  objectExpr?: Expression;
 }
 
 export interface ArrayLiteralNode extends BaseNode {
@@ -155,4 +157,8 @@ export interface NewInstanceNode extends BaseNode {
   type: 'NewInstance';
   className: string;
   args: Expression[];
+}
+
+export interface BreakStatementNode extends BaseNode {
+  type: 'BreakStatement';
 }

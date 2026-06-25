@@ -145,6 +145,16 @@ export class CParser extends BaseParser {
       };
     }
 
+    // Break statement
+    if (t.type === 'KEYWORD' && t.value === 'break') {
+      const startToken = this.next();
+      this.consume('PUNCTUATION', ';');
+      return {
+        type: 'BreakStatement',
+        loc: this.getLoc(startToken)
+      };
+    }
+
     // Free memory allocation: free(p)
     if (t.type === 'KEYWORD' && t.value === 'free') {
       const startToken = this.next();

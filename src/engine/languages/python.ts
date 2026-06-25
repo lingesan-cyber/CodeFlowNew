@@ -72,6 +72,16 @@ export class PythonParser extends BaseParser {
       };
     }
 
+    // Break statement: break
+    if (t.type === 'KEYWORD' && t.value === 'break') {
+      const startToken = this.next();
+      if (this.match('NEWLINE')) this.next();
+      return {
+        type: 'BreakStatement',
+        loc: this.getLoc(startToken)
+      };
+    }
+
     // Conditional: if cond: ... elif cond: ... else: ...
     if (t.type === 'KEYWORD' && (t.value === 'if' || t.value === 'elif')) {
       const startToken = this.next();
@@ -149,16 +159,16 @@ export class PythonParser extends BaseParser {
       this.consume('INDENT');
       const body = this.parseBlock();
 
-      // Convert python `for i in range(n)` to standard Loop node
-      // We can construct a standard Loop node with init, condition, and update
-      // Init: loopVar = 0 (or start)
-      // Condition: loopVar < end
-      // Update: loopVar += 1 (or step)
-      let initVal: Expression = { type: 'Literal', value: 0, valueType: 'number', loc: this.getLoc(startToken) };
-      let endVal: Expression = iterableExpr;
-      let stepVal: Expression = { type: 'Literal', value: 1, valueType: 'number', loc: this.getLoc(startToken) };
+      // Convert python `for loopVar in iterable` to standard Loop node
+      let init: Statement | Statement[];
+      let condition: Expression;
+      let update: Statement;
 
       if (iterableExpr.type === 'FunctionCall' && iterableExpr.name === 'range') {
+        let initVal: Expression = { type: 'Literal', value: 0, valueType: 'number', loc: this.getLoc(startToken) };
+        let endVal: Expression = iterableExpr;
+        let stepVal: Expression = { type: 'Literal', value: 1, valueType: 'number', loc: this.getLoc(startToken) };
+
         const args = iterableExpr.args;
         if (args.length === 1) {
           endVal = args[0];
@@ -170,36 +180,101 @@ export class PythonParser extends BaseParser {
           endVal = args[1];
           stepVal = args[2];
         }
-      }
 
-      const init: VarDeclarationNode = {
-        type: 'VarDeclaration',
-        name: loopVar.value,
-        varType: 'int',
-        valueExpr: initVal,
-        loc: this.getLoc(startToken)
-      };
+        init = {
+          type: 'VarDeclaration',
+          name: loopVar.value,
+          varType: 'int',
+          valueExpr: initVal,
+          loc: this.getLoc(startToken)
+        };
 
-      const condition: Expression = {
-        type: 'BinaryOp',
-        left: { type: 'Identifier', name: loopVar.value, loc: this.getLoc(loopVar) },
-        operator: '<',
-        right: endVal,
-        loc: this.getLoc(startToken)
-      };
-
-      const update: Statement = {
-        type: 'Assignment',
-        target: { type: 'Identifier', name: loopVar.value, loc: this.getLoc(loopVar) },
-        valueExpr: {
+        condition = {
           type: 'BinaryOp',
           left: { type: 'Identifier', name: loopVar.value, loc: this.getLoc(loopVar) },
-          operator: '+',
-          right: stepVal,
+          operator: '<',
+          right: endVal,
           loc: this.getLoc(startToken)
-        },
-        loc: this.getLoc(startToken)
-      };
+        };
+
+        update = {
+          type: 'Assignment',
+          target: { type: 'Identifier', name: loopVar.value, loc: this.getLoc(loopVar) },
+          valueExpr: {
+            type: 'BinaryOp',
+            left: { type: 'Identifier', name: loopVar.value, loc: this.getLoc(loopVar) },
+            operator: '+',
+            right: stepVal,
+            loc: this.getLoc(startToken)
+          },
+          loc: this.getLoc(startToken)
+        };
+      } else {
+        // Range-based iteration over list/array: translate using index iterator
+        const lineNum = startToken.line;
+        const objName = `_iter_obj_${loopVar.value}_${lineNum}`;
+        const idxName = `_iter_idx_${loopVar.value}_${lineNum}`;
+
+        init = [
+          // _iter_obj = iterableExpr
+          {
+            type: 'VarDeclaration',
+            name: objName,
+            varType: 'any',
+            valueExpr: iterableExpr,
+            loc: this.getLoc(startToken)
+          },
+          // _iter_idx = 0
+          {
+            type: 'VarDeclaration',
+            name: idxName,
+            varType: 'int',
+            valueExpr: { type: 'Literal', value: 0, valueType: 'number', loc: this.getLoc(startToken) },
+            loc: this.getLoc(startToken)
+          }
+        ];
+
+        condition = {
+          type: 'BinaryOp',
+          left: { type: 'Identifier', name: idxName, loc: this.getLoc(loopVar) },
+          operator: '<',
+          right: {
+            type: 'FunctionCall',
+            name: 'len',
+            args: [{ type: 'Identifier', name: objName, loc: this.getLoc(loopVar) }],
+            loc: this.getLoc(startToken)
+          },
+          loc: this.getLoc(startToken)
+        };
+
+        update = {
+          type: 'Assignment',
+          target: { type: 'Identifier', name: idxName, loc: this.getLoc(loopVar) },
+          valueExpr: {
+            type: 'BinaryOp',
+            left: { type: 'Identifier', name: idxName, loc: this.getLoc(loopVar) },
+            operator: '+',
+            right: { type: 'Literal', value: 1, valueType: 'number', loc: this.getLoc(startToken) },
+            loc: this.getLoc(startToken)
+          },
+          loc: this.getLoc(startToken)
+        };
+
+        // Prepend assignment of current item to loop variable inside body
+        const elementAssign: Statement = {
+          type: 'VarDeclaration',
+          name: loopVar.value,
+          varType: 'any',
+          valueExpr: {
+            type: 'ArrayAccess',
+            arrayExpr: { type: 'Identifier', name: objName, loc: this.getLoc(loopVar) },
+            indexExpr: { type: 'Identifier', name: idxName, loc: this.getLoc(loopVar) },
+            loc: this.getLoc(startToken)
+          },
+          loc: this.getLoc(startToken)
+        };
+        body.unshift(elementAssign);
+      }
 
       return {
         type: 'Loop',

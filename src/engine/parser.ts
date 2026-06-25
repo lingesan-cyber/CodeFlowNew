@@ -289,17 +289,17 @@ export abstract class BaseParser {
       };
     }
 
-    if (t.type === 'KEYWORD' && (t.value === 'true' || t.value === 'false')) {
+    if (t.type === 'KEYWORD' && (t.value === 'true' || t.value === 'false' || t.value === 'True' || t.value === 'False')) {
       const token = this.next();
       return {
         type: 'Literal',
-        value: token.value === 'true',
+        value: token.value.toLowerCase() === 'true',
         valueType: 'boolean',
         loc: this.getLoc(token)
       };
     }
 
-    if (t.type === 'KEYWORD' && (t.value === 'null' || t.value === 'NULL' || t.value === 'nullptr')) {
+    if (t.type === 'KEYWORD' && (t.value === 'null' || t.value === 'NULL' || t.value === 'nullptr' || t.value === 'None')) {
       const token = this.next();
       return {
         type: 'Literal',
@@ -338,7 +338,10 @@ export abstract class BaseParser {
     // Java instantiation: `new ClassName(...)`
     if (t.type === 'KEYWORD' && t.value === 'new') {
       const startToken = this.next();
-      const classNameToken = this.consume('IDENTIFIER');
+      const classNameToken = (this.match('IDENTIFIER') || this.match('KEYWORD')) ? this.next() : null;
+      if (!classNameToken) {
+        throw new Error(`Expected class name after 'new' at line ${startToken.line}`);
+      }
       // Could be array declaration `new int[5]` or object instantiation `new MyClass()`
       if (this.match('PUNCTUATION', '[')) {
         this.next();
@@ -396,10 +399,22 @@ export abstract class BaseParser {
             }
           }
           this.consume('PUNCTUATION', ')');
+          let objectExpr: Expression | undefined;
+          let name = 'anonymous';
+          if (expr.type === 'MemberAccess') {
+            objectExpr = expr.objectExpr;
+            name = expr.property;
+          } else if (expr.type === 'Identifier') {
+            name = expr.name;
+          } else {
+            name = (expr as any).name || (expr as any).property || 'anonymous';
+          }
+
           expr = {
             type: 'FunctionCall',
-            name: (expr as { name?: string; property?: string }).name || (expr as { name?: string; property?: string }).property || 'anonymous',
+            name,
             args,
+            objectExpr,
             loc: {
               line: expr.loc.line,
               columnStart: expr.loc.columnStart,
@@ -422,7 +437,10 @@ export abstract class BaseParser {
           };
         } else if (this.match('PUNCTUATION', '.')) {
           this.next();
-          const propToken = this.consume('IDENTIFIER');
+          const propToken = (this.match('IDENTIFIER') || this.match('KEYWORD')) ? this.next() : null;
+          if (!propToken) {
+            throw new Error(`Expected property identifier after '.'`);
+          }
           expr = {
             type: 'MemberAccess',
             objectExpr: expr,
@@ -435,7 +453,10 @@ export abstract class BaseParser {
           };
         } else if (this.match('OPERATOR', '->')) {
           this.next();
-          const propToken = this.consume('IDENTIFIER');
+          const propToken = (this.match('IDENTIFIER') || this.match('KEYWORD')) ? this.next() : null;
+          if (!propToken) {
+            throw new Error(`Expected property identifier after '->'`);
+          }
           // For pointers, `p->val` is syntax sugar for `(*p).val`
           const deref: Expression = {
             type: 'PointerDeref',

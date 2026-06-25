@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import { ExecutionStep, SupportedLanguage, AwaitingInput, ExecutionError } from '../engine/types';
 export type { SupportedLanguage };
 import { ASTInterpreter } from '../engine/interpreter';
+import { getSmartExplanation } from '../utils/smartEngine';
+
+export interface ExplanationState {
+  text: string;
+  source: 'ai' | 'engine';
+}
 
 export type PlaybackState = 'idle' | 'playing' | 'paused' | 'awaiting_input' | 'finished';
 export type EditorStatus = 'ready' | 'running' | 'error' | 'finished';
@@ -27,10 +33,12 @@ interface CodeFlowState {
   theme: 'light' | 'dark';
 
   // AI Preloaded Explanations
-  explanations: Record<number, string>;
+  explanations: Record<number, ExplanationState>;
   explanationsLoading: boolean;
   explanationsError: string | null;
-  fetchBatchExplanations: () => Promise<void>;
+  fetchingSteps: Record<number, boolean>;
+  fetchStepExplanation: (index: number) => Promise<void>;
+  triggerExplanationFetch: (index: number) => void;
 
   // Actions
   toggleBreakpoint: (line: number) => void;
@@ -134,6 +142,9 @@ int main() {
 let activeInterpreter: ASTInterpreter | null = null;
 let activeGenerator: Generator<ExecutionStep, ExecutionStep[], string | undefined> | null = null;
 
+// AbortController map: one controller per step index so stale fetches can be cancelled cleanly
+const abortControllers = new Map<number, AbortController>();
+
 const logStepTransition = (oldIdx: number, newIdx: number, speed: number) => {
   const delay = 1000 / speed;
   console.log(`[Playback Engine] Selected Speed: ${speed}x | Calculated Delay: ${delay}ms | Step Transition: ${oldIdx} -> ${newIdx} | Timestamp: ${new Date().toISOString()}`);
@@ -157,6 +168,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   explanations: {},
   explanationsLoading: false,
   explanationsError: null,
+  fetchingSteps: {},
 
   selectedItem: null,
   chatHistory: [],
@@ -164,7 +176,11 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   chatLoading: false,
   aiTutorOpen: false,
 
-  setCode: (code) => set({ code }),
+  setCode: (code) => set((state) => ({ 
+    code,
+    executionError: null,
+    editorStatus: state.editorStatus === 'error' ? 'ready' : state.editorStatus
+  })),
   setLanguage: (language) => set({ 
     language, 
     code: DEFAULT_PROGRAMS[language],
@@ -178,68 +194,117 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     explanations: {},
     explanationsLoading: false,
     explanationsError: null,
+    fetchingSteps: {},
     selectedItem: null,
     chatHistory: [],
     chatLoading: false
   }),
 
-  fetchBatchExplanations: async () => {
-    const { steps, code, language, explanationsLoading } = get();
-    if (steps.length === 0 || explanationsLoading) return;
+  fetchStepExplanation: async (index: number) => {
+    const { steps, code, language, explanations, fetchingSteps } = get();
+    if (steps.length === 0 || index < 0 || index >= steps.length) return;
+    
+    // Cache check: Avoid duplicate requests or overriding an already resolved AI explanation
+    if (fetchingSteps[index] || (explanations[index] && explanations[index].source === 'ai')) {
+      return;
+    }
 
-    set({ explanationsLoading: true, explanationsError: null });
+    // Cancel any previous in-flight request for this same step index
+    const existing = abortControllers.get(index);
+    if (existing) {
+      existing.abort();
+    }
+    const controller = new AbortController();
+    abortControllers.set(index, controller);
+
+    set((state) => ({
+      fetchingSteps: { ...state.fetchingSteps, [index]: true }
+    }));
 
     try {
+      const step = steps[index];
+      const context = {
+        code,
+        lineNumber: step.lineNumber,
+        operation: step.operation,
+        variables: step.variables,
+        callStack: step.callStack,
+        stdout: step.stdout,
+        error: step.error || undefined
+      };
+
+      console.log('=== FETCH START ===');
+      console.log(`Step ${index} | feature: explain_step | lang: ${language}`);
+
       const response = await fetch('/api/ai/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          feature: 'explain_batch',
+          feature: 'explain_step',
           language,
-          context: {
-            code,
-            lineNumber: 1,
-            operation: 'system',
-            variables: [],
-            callStack: [],
-            stdout: ''
-          },
-          trace: steps
-        })
+          context
+        }),
+        signal: controller.signal   // ← tied to AbortController
       });
 
+      console.log('=== ROUTE RECEIVED ===', response.status, response.statusText);
+
       if (!response.ok) {
-        throw new Error('Failed to fetch batch explanations');
+        const errBody = await response.text().catch(() => '');
+        throw new Error(`HTTP ${response.status}: ${errBody || response.statusText}`);
       }
 
       const data = await response.json();
-      let parsedExplanations: string[] = [];
-      try {
-        parsedExplanations = JSON.parse(data.explanation);
-      } catch {
-        const cleaned = data.explanation.replace(/```json/g, '').replace(/```/g, '').trim();
-        parsedExplanations = JSON.parse(cleaned);
+      const explanationText = data.explanation;
+
+      console.log('=== PARSED AI RESPONSE ===');
+      console.log(`Step ${index}:`, explanationText);
+      console.log('==========================');
+
+      // Only upgrade if the AI returned a valid explanation and not the unavailable fallback
+      if (explanationText && explanationText !== '[AI unavailable]') {
+        console.log('=== STORE UPDATE ===');
+        console.log(`Step ${index}:`, explanationText);
+        console.log('====================');
+
+        set((state) => ({
+          explanations: {
+            ...state.explanations,
+            [index]: {
+              text: explanationText,
+              source: 'ai'
+            }
+          }
+        }));
       }
-
-      const explanationsMap: Record<number, string> = {};
-      parsedExplanations.forEach((exp: string, idx: number) => {
-        explanationsMap[idx] = exp;
-      });
-
-      console.log("=== PROCESSED EXPLANATIONS ===");
-      console.log(explanationsMap);
-      console.log("==============================");
-
-      set({
-        explanations: explanationsMap,
-        explanationsLoading: false
-      });
     } catch (err) {
-      console.error(err);
-      set({
-        explanationsError: err instanceof Error ? err.message : 'Failed to preload explanations',
-        explanationsLoading: false
-      });
+      // AbortError is expected during fast playback — not a real failure, swallow silently
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.log(`fetchStepExplanation: step ${index} fetch cancelled (AbortError — expected during fast playback)`);
+        return;
+      }
+      console.error(`fetchStepExplanation error for step ${index}:`, err);
+    } finally {
+      abortControllers.delete(index);
+      set((state) => ({
+        fetchingSteps: { ...state.fetchingSteps, [index]: false }
+      }));
+    }
+  },
+
+  triggerExplanationFetch: (index: number) => {
+    const { steps } = get();
+    if (steps.length === 0) return;
+
+    // Fetch current step
+    get().fetchStepExplanation(index);
+
+    // Prefetch next 2 steps
+    if (index + 1 < steps.length) {
+      get().fetchStepExplanation(index + 1);
+    }
+    if (index + 2 < steps.length) {
+      get().fetchStepExplanation(index + 2);
     }
   },
 
@@ -299,18 +364,34 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
           result = activeGenerator.next();
         }
 
+        if (result.done && Array.isArray(result.value)) {
+          newSteps.push(...result.value);
+        }
+
+        const explanationsMap = { ...get().explanations };
+        newSteps.forEach((step, idx) => {
+          if (!explanationsMap[idx]) {
+            explanationsMap[idx] = {
+              text: getSmartExplanation(step, idx > 0 ? newSteps[idx - 1] : undefined),
+              source: 'engine'
+            };
+          }
+        });
+
         set({ 
           steps: newSteps,
-          playbackState: 'playing'
+          playbackState: 'playing',
+          explanations: explanationsMap
         });
 
         if (result.done) {
+          const lastStep = newSteps[newSteps.length - 1];
+          const isError = lastStep && (lastStep.operation === 'error' || !!lastStep.error);
           set({ 
-            editorStatus: 'finished'
+            editorStatus: isError ? 'error' : 'finished'
           });
           activeGenerator = null;
           activeInterpreter = null;
-          get().fetchBatchExplanations();
         }
 
         get().stepForward();
@@ -338,6 +419,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       explanations: {},
       explanationsLoading: false,
       explanationsError: null,
+      fetchingSteps: {},
       selectedItem: null,
       chatHistory: [],
       chatLoading: false
@@ -370,28 +452,46 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
         result = activeGenerator.next();
       }
 
+      if (result.done && Array.isArray(result.value)) {
+        generatedSteps.push(...result.value);
+      }
+
       if (generatedSteps.length === 0) {
         throw new Error("No steps generated.");
       }
 
       const firstStep = generatedSteps[0];
       const isFirstAwaiting = firstStep.awaitingInput !== undefined && firstStep.awaitingInput !== null;
+      const isFirstError = firstStep.operation === 'error' || !!firstStep.error;
+
+      // Pre-populate Smart Engine explanations immediately for all steps
+      const explanationsMap: Record<number, ExplanationState> = {};
+      generatedSteps.forEach((step, idx) => {
+        explanationsMap[idx] = {
+          text: getSmartExplanation(step, idx > 0 ? generatedSteps[idx - 1] : undefined),
+          source: 'engine'
+        };
+      });
 
       set({
         steps: generatedSteps,
         currentStepIndex: 0,
-        playbackState: isFirstAwaiting ? 'awaiting_input' : 'playing',
+        playbackState: isFirstError ? 'paused' : (isFirstAwaiting ? 'awaiting_input' : 'playing'),
         awaitingInput: firstStep.awaitingInput || null,
-        stdout: firstStep.stdout || ''
+        stdout: firstStep.stdout || '',
+        explanations: explanationsMap,
+        executionError: isFirstError ? (firstStep.error || { message: firstStep.description, line: firstStep.lineNumber }) : null,
+        editorStatus: isFirstError ? 'error' : 'running'
       });
 
       if (result.done) {
+        const lastStep = generatedSteps[generatedSteps.length - 1];
+        const isError = lastStep && (lastStep.operation === 'error' || !!lastStep.error);
         set({ 
-          editorStatus: 'finished'
+          editorStatus: isError ? 'error' : 'finished'
         });
         activeGenerator = null;
         activeInterpreter = null;
-        get().fetchBatchExplanations();
       }
 
     } catch (err) {
@@ -404,6 +504,10 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   },
 
   stopExecution: () => {
+    // Cancel all in-flight AI explanation fetches
+    abortControllers.forEach((ctrl) => ctrl.abort());
+    abortControllers.clear();
+
     activeGenerator = null;
     activeInterpreter = null;
     set({
@@ -416,6 +520,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       explanations: {},
       explanationsLoading: false,
       explanationsError: null,
+      fetchingSteps: {},
       selectedItem: null,
       chatHistory: [],
       chatLoading: false
@@ -431,12 +536,20 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       const nextStep = steps[nextIndex];
       logStepTransition(currentStepIndex, nextIndex, speed);
       
+      const isError = nextStep.operation === 'error' || !!nextStep.error;
+
       set({ 
         currentStepIndex: nextIndex,
         stdout: nextStep.stdout
       });
 
-      if (nextStep.awaitingInput) {
+      if (isError) {
+        set({
+          executionError: nextStep.error || { message: nextStep.description, line: nextStep.lineNumber },
+          editorStatus: 'error',
+          playbackState: 'paused'
+        });
+      } else if (nextStep.awaitingInput) {
         set({
           awaitingInput: nextStep.awaitingInput,
           playbackState: 'awaiting_input'
@@ -454,7 +567,9 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       logStepTransition(currentStepIndex, nextIndex, speed);
       set({ 
         currentStepIndex: nextIndex,
-        stdout: steps[nextIndex].stdout
+        stdout: steps[nextIndex].stdout,
+        executionError: null,
+        editorStatus: 'running'
       });
     }
   },

@@ -108,10 +108,37 @@ export default function LearnIDE() {
     stepForward,
     stepBackward,
     jumpToStart,
-    jumpToEnd
+    jumpToEnd,
+    triggerExplanationFetch
   } = useCodeFlowStore();
 
   const [userSelectedTab, setUserSelectedTab] = useState<'execution' | 'memory' | 'output' | null>(null);
+
+  // Debounce ref — avoids flooding Ollama during fast auto-playback
+  const explanationDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Predictive prefetching on step transitions (debounced 300 ms)
+  useEffect(() => {
+    if (steps.length === 0) return;
+
+    // Clear any pending debounced call from the previous render
+    if (explanationDebounceRef.current) {
+      clearTimeout(explanationDebounceRef.current);
+    }
+
+    // Only fire the AI fetch after the user has settled on a step for 300 ms.
+    // During fast auto-playback this means only the "current" step is fetched,
+    // not every intermediate step the timer skips through.
+    explanationDebounceRef.current = setTimeout(() => {
+      triggerExplanationFetch(currentStepIndex);
+    }, 300);
+
+    return () => {
+      if (explanationDebounceRef.current) {
+        clearTimeout(explanationDebounceRef.current);
+      }
+    };
+  }, [currentStepIndex, steps.length, triggerExplanationFetch]);
 
   // Reset user selection when steps change (e.g. new compilation run)
   const prevStepsLengthRef = useRef(0);
@@ -294,9 +321,15 @@ export default function LearnIDE() {
                   
                   <div className="flex-1 flex overflow-hidden bg-slate-950/70 text-xs font-mono select-text">
                         {isRunning ? (
-                      (() => {
-                        const currentStep = steps[currentStepIndex];
-                        const explanationText = explanations[currentStepIndex];
+                          (() => {
+                            const currentStep = steps[currentStepIndex];
+                        const explanationObj = explanations[currentStepIndex];
+                        const explanationText = explanationObj ? explanationObj.text : '';
+                        const explanationSource = explanationObj ? explanationObj.source : 'engine';
+
+                        console.log("=== UI VALUE ===");
+                        console.log(explanationText);
+                        console.log("================");
                         console.log("=== FINAL UI VALUE (AI Explanation - Active Execution) ===");
                         console.log(`Step ${currentStepIndex} (Line ${currentStep?.lineNumber}):`, explanationText);
                         console.log("=========================================================");
@@ -314,55 +347,32 @@ export default function LearnIDE() {
                         };
                         
                         const descParts = currentStep ? splitDescription(currentStep.description) : { title: '', detail: '' };
-                        const hasStdout = stdout && stdout.trim().length > 0;
                         const recentChanges = getMemoryHistory(steps, currentStepIndex);
                         
                         return (
                           <div className="flex-1 flex flex-row min-h-0 overflow-hidden divide-x divide-slate-800/80">
                             {/* Left Section (75% width, flex-[3]) */}
                             <div className="flex-[3] flex flex-col min-h-0 overflow-hidden min-w-0">
-                              {/* A: Execution Explanation */}
-                              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                                {hasStdout && (
-                                  <div className="px-4 py-1.5 bg-slate-900/80 border-b border-slate-850 text-[9px] font-bold text-slate-400 uppercase tracking-wider select-none shrink-0">
-                                    Execution Explanation
+                              {/* Execution Explanation - Full Height */}
+                              <div className="flex-1 overflow-y-auto p-3 pr-1 custom-scrollbar">
+                                <div className="text-base font-bold text-blue-400">Line {currentStep.lineNumber}</div>
+                                <div className="mt-1.5 text-xs font-semibold text-slate-300">
+                                  {descParts.title}
+                                </div>
+                                {descParts.detail && (
+                                  <div className="mt-1 text-sm font-mono text-slate-100 font-bold">
+                                    {descParts.detail}
                                   </div>
                                 )}
-                                <div className="flex-1 overflow-y-auto p-3 pr-1 custom-scrollbar">
-                                  <div className="text-base font-bold text-blue-400">Line {currentStep.lineNumber}</div>
-                                  <div className="mt-1.5 text-xs font-semibold text-slate-300">
-                                    {descParts.title}
+                                {explanationText && (
+                                  <div className="border-t border-slate-800/80 pt-2 mt-2 text-slate-400 text-[11px] leading-relaxed">
+                                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-0.5 select-none">
+                                      {explanationSource === 'ai' ? 'AI Explanation' : 'Explanation'}
+                                    </span>
+                                    {explanationText}
                                   </div>
-                                  {descParts.detail && (
-                                    <div className="mt-1 text-sm font-mono text-slate-100 font-bold">
-                                      {descParts.detail}
-                                    </div>
-                                  )}
-                                  {explanationText && (
-                                    <div className="border-t border-slate-800/80 pt-2 mt-2 text-slate-400 text-[11px] leading-relaxed">
-                                      <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-0.5 select-none">AI Explanation</span>
-                                      {explanationText}
-                                    </div>
-                                  )}
-                                </div>
+                                )}
                               </div>
-
-                              {/* B: Program Output Divider and Content */}
-                              {hasStdout && (
-                                <div className="flex-1 flex flex-col min-h-0 overflow-hidden shrink-0 border-t border-slate-800/80">
-                                  {/* Output Section Divider */}
-                                  <div className="bg-slate-950 px-4 py-1.5 flex flex-col items-center justify-center select-none shrink-0 border-b border-slate-850 text-center font-bold text-[9px] uppercase tracking-wider text-slate-400">
-                                    <span className="text-slate-600 block leading-none select-none tracking-widest">━━━━━━━━━━━━━━━━━━━━</span>
-                                    <span className="text-slate-300 block py-0.5 leading-none select-none">Program Output</span>
-                                    <span className="text-slate-600 block leading-none select-none tracking-widest">━━━━━━━━━━━━━━━━━━━━</span>
-                                  </div>
-                                  <div className="flex-1 overflow-y-auto p-3 pr-1 custom-scrollbar">
-                                    <pre className="text-emerald-400 leading-relaxed text-xs whitespace-pre-wrap select-text">
-                                      {stdout}
-                                    </pre>
-                                  </div>
-                                </div>
-                              )}
                             </div>
 
                             {/* Right Section (25% width, flex-[1]) */}
@@ -414,7 +424,13 @@ export default function LearnIDE() {
                       ) : (
                         (() => {
                           const currentStep = steps[currentStepIndex];
-                          const explanationText = explanations[currentStepIndex];
+                          const explanationObj = explanations[currentStepIndex];
+                          const explanationText = explanationObj ? explanationObj.text : '';
+                          const explanationSource = explanationObj ? explanationObj.source : 'engine';
+
+                          console.log("=== UI VALUE ===");
+                          console.log(explanationText);
+                          console.log("================");
                           console.log("=== FINAL UI VALUE (AI Explanation - Execution Tab) ===");
                           console.log(`Step ${currentStepIndex} (Line ${currentStep?.lineNumber}):`, explanationText);
                           console.log("=====================================================");
@@ -446,7 +462,9 @@ export default function LearnIDE() {
                                 )}
                                 {explanationText && (
                                   <div className="border-t border-slate-800/80 pt-2 mt-3 text-slate-400 text-[11px] leading-relaxed">
-                                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-1">AI Explanation</span>
+                                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 block mb-1">
+                                      {explanationSource === 'ai' ? 'AI Explanation' : 'Explanation'}
+                                    </span>
                                     {explanationText}
                                   </div>
                                 )}

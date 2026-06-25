@@ -18,6 +18,7 @@ export class ASTInterpreter {
   private stdout = '';
   private returnVal: unknown = null;
   private isReturning = false;
+  private isBroken = false;
   
   // Tracing State
   private steps: ExecutionStep[] = [];
@@ -73,6 +74,8 @@ export class ASTInterpreter {
     this.stack = [];
     this.heap.clear();
     this.stdout = '';
+    this.isReturning = false;
+    this.isBroken = false;
     this.addrToVarName.clear();
     this.varNameToAddr.clear();
     
@@ -160,7 +163,7 @@ export class ASTInterpreter {
   }
 
   private *executeStatement(stmt: Statement, funcs: Map<string, FunctionDeclarationNode>): Generator<ExecutionStep, void, string | undefined> {
-    if (this.isReturning) return;
+    if (this.isReturning || this.isBroken) return;
 
     if (Date.now() - this.startTime > this.timeoutMs) {
       throw new Error('Execution timeout: infinite loop detected');
@@ -223,12 +226,24 @@ export class ASTInterpreter {
       }
 
       case 'Loop': {
+        let iterationCount = 0;
+        console.log("LOOP ENTER");
+        console.log("LOOP BODY LENGTH:", stmt.body.length);
         if (stmt.init) {
-          yield* this.executeStatement(stmt.init, funcs);
+          if (Array.isArray(stmt.init)) {
+            for (const subStmt of stmt.init) {
+              yield* this.executeStatement(subStmt, funcs);
+            }
+          } else {
+            yield* this.executeStatement(stmt.init, funcs);
+          }
         }
 
         while (true) {
           const cond = yield* this.evaluateExpression(stmt.condition, funcs);
+          if (stmt.loopType === 'while') {
+            console.log("WHILE CONDITION:", cond);
+          }
           yield this.createStep(
             line,
             'loop_start',
@@ -238,17 +253,26 @@ export class ASTInterpreter {
 
           if (!cond) break;
 
-          for (const subStmt of stmt.body) {
-            yield* this.executeStatement(subStmt, funcs);
-            if (this.isReturning) break;
+          if (stmt.loopType === 'while') {
+            iterationCount++;
+            console.log("ENTERING LOOP BODY");
+            console.log("LOOP ITERATION:", iterationCount);
           }
 
-          if (this.isReturning) break;
+          for (const subStmt of stmt.body) {
+            console.log("EXECUTING BODY STATEMENT", subStmt.type);
+            yield* this.executeStatement(subStmt, funcs);
+            if (this.isReturning || this.isBroken) break;
+          }
+
+          if (this.isReturning || this.isBroken) break;
 
           if (stmt.update) {
             yield* this.executeStatement(stmt.update, funcs);
           }
         }
+        console.log("LOOP EXIT");
+        this.isBroken = false;
         break;
       }
 
@@ -266,6 +290,18 @@ export class ASTInterpreter {
         break;
       }
 
+      case 'BreakStatement': {
+        this.isBroken = true;
+        console.log("BREAK EXECUTED");
+        yield this.createStep(
+          line,
+          'system',
+          'Break executed. Exiting loop.',
+          stmt.loc
+        );
+        break;
+      }
+
       case 'Output': {
         const outputs = [];
         for (const e of stmt.exprs) {
@@ -278,11 +314,12 @@ export class ASTInterpreter {
         if ((this.lang === 'c' || this.lang === 'cpp') && outputs.length > 0 && typeof outputs[0] === 'string') {
           outStr = this.formatPrintf(outputs[0], outputs.slice(1));
         } else {
+          const sep = (this.lang === 'c' || this.lang === 'cpp' || this.lang === 'java') ? '' : ' ';
           outStr = outputs.map(o => {
             if (o === null || o === undefined) return 'null';
             if (typeof o === 'string') return this.unescapeString(o);
             return String(o);
-          }).join(' ');
+          }).join(sep);
         }
 
         if (appendNewline) {
@@ -331,12 +368,27 @@ export class ASTInterpreter {
         // Yield execution to the outer runner to await input
         const inputVal = yield traceStep;
 
+        // Reset timeout start time so the user's typing time doesn't trigger loop timeout
+        this.startTime = Date.now();
+
         // Process injected input
         let parsedVal: string | number = inputVal || '';
-        if (stmt.expectedType === 'integer') {
+        let expectedType = stmt.expectedType;
+        if (expectedType === 'string' && stmt.target.type === 'Identifier') {
+          const v = this.lookupVariable(stmt.target.name);
+          if (v) {
+            if (v.type === 'int' || v.type === 'integer') {
+              expectedType = 'integer';
+            } else if (v.type === 'float' || v.type === 'double' || v.type === 'number') {
+              expectedType = 'float';
+            }
+          }
+        }
+
+        if (expectedType === 'integer') {
           parsedVal = parseInt(inputVal || '0', 10);
           if (isNaN(parsedVal)) parsedVal = 0;
-        } else if (stmt.expectedType === 'float' || stmt.expectedType === 'number') {
+        } else if (expectedType === 'float' || expectedType === 'number') {
           parsedVal = parseFloat(inputVal || '0.0');
           if (isNaN(parsedVal)) parsedVal = 0.0;
         }
@@ -452,18 +504,18 @@ export class ASTInterpreter {
         }
       }
     } else if (target.type === 'ArrayAccess') {
-      const arr = yield* this.evaluateExpression(target.arrayExpr, funcs);
+      const arrAddr = yield* this.getHeapAddress(target.arrayExpr, funcs);
       const index = yield* this.evaluateExpression(target.indexExpr, funcs);
-      if (typeof arr === 'string' && this.heap.has(arr)) {
-        const heapObj = this.heap.get(arr)!;
+      if (arrAddr && this.heap.has(arrAddr)) {
+        const heapObj = this.heap.get(arrAddr)!;
         if (Array.isArray(heapObj.value)) {
           (heapObj.value as unknown[])[index as number] = val;
         }
       }
     } else if (target.type === 'MemberAccess') {
-      const obj = yield* this.evaluateExpression(target.objectExpr, funcs);
-      if (typeof obj === 'string' && this.heap.has(obj)) {
-        const heapObj = this.heap.get(obj)!;
+      const objAddr = yield* this.getHeapAddress(target.objectExpr, funcs);
+      if (objAddr && this.heap.has(objAddr)) {
+        const heapObj = this.heap.get(objAddr)!;
         if (heapObj.value && typeof heapObj.value === 'object') {
           (heapObj.value as Record<string, unknown>)[target.property] = val;
         }
@@ -633,19 +685,19 @@ export class ASTInterpreter {
       }
 
       case 'ArrayAccess': {
-        const arr = yield* this.evaluateExpression(expr.arrayExpr, activeFuncs);
+        const arrAddr = yield* this.getHeapAddress(expr.arrayExpr, activeFuncs);
         const index = yield* this.evaluateExpression(expr.indexExpr, activeFuncs);
-        if (typeof arr === 'string' && this.heap.has(arr)) {
-          const heapObj = this.heap.get(arr)!;
+        if (arrAddr && this.heap.has(arrAddr)) {
+          const heapObj = this.heap.get(arrAddr)!;
           return Array.isArray(heapObj.value) ? heapObj.value[index as number] : null;
         }
         return null;
       }
 
       case 'MemberAccess': {
-        const obj = yield* this.evaluateExpression(expr.objectExpr, activeFuncs);
-        if (typeof obj === 'string' && this.heap.has(obj)) {
-          const heapObj = this.heap.get(obj)!;
+        const objAddr = yield* this.getHeapAddress(expr.objectExpr, activeFuncs);
+        if (objAddr && this.heap.has(objAddr)) {
+          const heapObj = this.heap.get(objAddr)!;
           return heapObj.value && typeof heapObj.value === 'object'
             ? (heapObj.value as Record<string, unknown>)[expr.property]
             : null;
@@ -654,6 +706,43 @@ export class ASTInterpreter {
       }
 
       case 'FunctionCall': {
+        // Resolve target object address for method calls
+        let objAddr: string | null = null;
+        if (expr.objectExpr) {
+          const evaluatedObj = yield* this.evaluateExpression(expr.objectExpr, activeFuncs);
+          if (typeof evaluatedObj === 'string') {
+            objAddr = evaluatedObj;
+          }
+        }
+
+        // Python append / JS push
+        if (objAddr && (expr.name === 'append' || expr.name === 'push')) {
+          const heapObj = this.heap.get(objAddr);
+          if (heapObj && Array.isArray(heapObj.value)) {
+            const argVal = yield* this.evaluateExpression(expr.args[0], activeFuncs);
+            heapObj.value.push(argVal);
+            return null;
+          }
+        }
+
+        // Built-in str() / String()
+        if (expr.name === 'str' || expr.name === 'String') {
+          const argVal = yield* this.evaluateExpression(expr.args[0], activeFuncs);
+          return argVal === null || argVal === undefined ? 'null' : String(argVal);
+        }
+
+        // Built-in int() / float() / parseInt() / parseFloat()
+        if (expr.name === 'int' || expr.name === 'parseInt') {
+          const argVal = yield* this.evaluateExpression(expr.args[0], activeFuncs);
+          const parsed = parseInt(String(argVal), 10);
+          return isNaN(parsed) ? 0 : parsed;
+        }
+        if (expr.name === 'float' || expr.name === 'parseFloat') {
+          const argVal = yield* this.evaluateExpression(expr.args[0], activeFuncs);
+          const parsed = parseFloat(String(argVal));
+          return isNaN(parsed) ? 0.0 : parsed;
+        }
+
         // C memory allocation: malloc(size)
         if (expr.name === 'malloc' || expr.name === 'realloc') {
           const heapId = this.getNextHeapAddress();
@@ -663,6 +752,23 @@ export class ASTInterpreter {
             value: new Array(5).fill(0) // Default contiguous allocation block of size 5
           });
           return heapId;
+        }
+
+        if (expr.name === 'len' && expr.args.length === 1) {
+          const argVal = yield* this.evaluateExpression(expr.args[0], activeFuncs);
+          if (typeof argVal === 'string' && this.heap.has(argVal)) {
+            const heapObj = this.heap.get(argVal)!;
+            if (Array.isArray(heapObj.value)) {
+              return heapObj.value.length;
+            }
+          }
+          if (Array.isArray(argVal)) {
+            return argVal.length;
+          }
+          if (typeof argVal === 'string') {
+            return argVal.length;
+          }
+          return 0;
         }
 
         // Look up functions
@@ -904,5 +1010,38 @@ export class ASTInterpreter {
       }
     }
     return result;
+  }
+
+  private *getHeapAddress(expr: Expression, funcs: Map<string, FunctionDeclarationNode>): Generator<ExecutionStep, string | null, string | undefined> {
+    if (expr.type === 'Identifier') {
+      const val = yield* this.evaluateExpression(expr, funcs);
+      return typeof val === 'string' ? val : null;
+    }
+    if (expr.type === 'PointerDeref') {
+      const addr = yield* this.evaluateExpression(expr.pointerExpr, funcs);
+      return typeof addr === 'string' ? addr : null;
+    }
+    if (expr.type === 'MemberAccess') {
+      const parentAddr = yield* this.getHeapAddress(expr.objectExpr, funcs);
+      if (parentAddr && this.heap.has(parentAddr)) {
+        const heapObj = this.heap.get(parentAddr)!;
+        if (heapObj.value && typeof heapObj.value === 'object') {
+          const val = (heapObj.value as Record<string, unknown>)[expr.property];
+          return typeof val === 'string' ? val : null;
+        }
+      }
+    }
+    if (expr.type === 'ArrayAccess') {
+      const parentAddr = yield* this.getHeapAddress(expr.arrayExpr, funcs);
+      const index = yield* this.evaluateExpression(expr.indexExpr, funcs);
+      if (parentAddr && this.heap.has(parentAddr)) {
+        const heapObj = this.heap.get(parentAddr)!;
+        if (Array.isArray(heapObj.value)) {
+          const val = heapObj.value[index as number];
+          return typeof val === 'string' ? val : null;
+        }
+      }
+    }
+    return null;
   }
 }

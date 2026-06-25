@@ -141,6 +141,24 @@ export class CPPParser extends BaseParser {
       this.next(); // e.g. int, vector, string
       let varType = typePrefix + startToken.value;
 
+      // Handle struct definition skipping in C++
+      if (startToken.value === 'struct' && this.match('IDENTIFIER')) {
+        const structName = this.next();
+        varType += ' ' + structName.value;
+
+        // Is it a struct definition: struct Node { ... };
+        if (this.match('PUNCTUATION', '{')) {
+          this.next();
+          // Skip struct fields
+          while (!this.match('PUNCTUATION', '}') && !this.match('EOF')) {
+            this.next();
+          }
+          this.consume('PUNCTUATION', '}');
+          this.consume('PUNCTUATION', ';');
+          return null;
+        }
+      }
+
       // Handle templates e.g. vector<int>
       if (this.match('OPERATOR', '<')) {
         this.next();
@@ -234,6 +252,16 @@ export class CPPParser extends BaseParser {
       return {
         type: 'ReturnStatement',
         valueExpr,
+        loc: this.getLoc(startToken)
+      };
+    }
+
+    // Break statement
+    if (t.type === 'KEYWORD' && t.value === 'break') {
+      const startToken = this.next();
+      this.consume('PUNCTUATION', ';');
+      return {
+        type: 'BreakStatement',
         loc: this.getLoc(startToken)
       };
     }

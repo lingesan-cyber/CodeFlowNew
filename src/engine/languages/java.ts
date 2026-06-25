@@ -137,6 +137,16 @@ export class JavaParser extends BaseParser {
       };
     }
 
+    // Break statement
+    if (t.type === 'KEYWORD' && t.value === 'break') {
+      const startToken = this.next();
+      this.consume('PUNCTUATION', ';');
+      return {
+        type: 'BreakStatement',
+        loc: this.getLoc(startToken)
+      };
+    }
+
     // Conditional
     if (t.type === 'KEYWORD' && t.value === 'if') {
       const startToken = this.next();
@@ -311,6 +321,22 @@ export class JavaParser extends BaseParser {
 
       // Check if it's a Scanner initialization: Scanner sc = new Scanner(System.in);
       // We don't execute Scanner constructor in full, just treat it as Scanner declaration
+      if (valueExpr && valueExpr.type === 'FunctionCall') {
+        const scannerMethods = ['nextInt', 'nextDouble', 'nextLine', 'nextFloat', 'next'];
+        if (scannerMethods.includes(valueExpr.name)) {
+          let expectedType: 'string' | 'number' | 'integer' | 'float' = 'string';
+          if (valueExpr.name === 'nextInt') expectedType = 'integer';
+          else if (valueExpr.name === 'nextDouble' || valueExpr.name === 'nextFloat') expectedType = 'float';
+          
+          return {
+            type: 'Input',
+            prompt: `Enter ${expectedType} for ${valueExpr.name}():`,
+            target: { type: 'Identifier', name: nameToken.value, loc: this.getLoc(nameToken) },
+            expectedType,
+            loc: this.getLoc(startToken)
+          };
+        }
+      }
       
       return {
         type: 'VarDeclaration',
