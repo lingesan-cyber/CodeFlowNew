@@ -414,6 +414,13 @@ const testCases: TestCase[] = [
     mockInputs: ["10"]
   },
   {
+    id: "IN_PYTHON_METHOD",
+    category: "Input",
+    language: "python",
+    code: `x = input("Prompt: ").lower()\nprint(x)`,
+    mockInputs: ["Coffee"]
+  },
+  {
     id: "IN_JS",
     category: "Input",
     language: "javascript",
@@ -514,6 +521,42 @@ const testCases: TestCase[] = [
     code: `node2 = [20, None]\nnode1 = [10, node2]\nprint(node1[0], node1[1][0])`
   },
   {
+    id: "DICT_BASIC_PYTHON",
+    category: "Data Structures",
+    language: "python",
+    code: `d = {"a": 1, "b": 2}\nprint(d["a"])\nd["a"] += 5\nprint(d["a"])`
+  },
+  {
+    id: "DICT_ITER_PYTHON",
+    category: "Data Structures",
+    language: "python",
+    code: `d = {"a": 6, "b": 2}\nfor k, v in d.items():\n    print(k, v)`
+  },
+  {
+    id: "PYTHON_IN_OPERATOR",
+    category: "Data Structures",
+    language: "python",
+    code: `d = {"a": 1, "b": 2}\narr = [10, 20, 30]\nprint("a" in d)\nprint("c" in d)\nprint(20 in arr)\nprint(40 in arr)\nprint("cat" in "concat")`
+  },
+  {
+    id: "PYTHON_NOT_IN_OPERATOR",
+    category: "Data Structures",
+    language: "python",
+    code: `d = {"a": 1, "b": 2}\narr = [10, 20, 30]\nprint("a" not in d)\nprint("c" not in d)\nprint(20 not in arr)\nprint(40 not in arr)\nprint("dog" not in "concat")`
+  },
+  {
+    id: "PYTHON_TRY_EXCEPT",
+    category: "Error Handling",
+    language: "python",
+    code: `try:\n    x = int("10")\n    print("Success:", x)\nexcept ValueError:\n    print("Failed")\n\ntry:\n    y = int("invalid")\n    print("Success:", y)\nexcept ValueError:\n    print("Caught ValueError")`
+  },
+  {
+    id: "PYTHON_CLASSES",
+    category: "Objects",
+    language: "python",
+    code: `class Player:\n    def __init__(self, name, level, health):\n        self.name = name\n        self.level = level\n        self.health = health\n\np1 = Player("Hero", 15, 99.5)\nprint(p1.name)\nprint(p1.level)\nprint(p1.health)\np1.health = 80.0\nprint(p1.health)`
+  },
+  {
     id: "DS_JS",
     category: "Data Structures",
     language: "javascript",
@@ -605,6 +648,24 @@ const testCases: TestCase[] = [
     language: "cpp",
     code: `int main() { std::cout << ; }`,
     expectFail: true
+  },
+  {
+    id: "CPP_CLASS_REGRESSION",
+    category: "Objects",
+    language: "cpp",
+    code: `#include <iostream>\nclass Player {\npublic:\n  int score = 100;\n};\nint main() {\n  Player p;\n  std::cout << p.score << std::endl;\n  return 0;\n}`
+  },
+  {
+    id: "CPP_CTOR_REGRESSION",
+    category: "Objects",
+    language: "cpp",
+    code: `#include <iostream>\nclass Player {\npublic:\n  int score;\n  Player(int s) { score = s; }\n};\nint main() {\n  Player p(100);\n  std::cout << p.score << std::endl;\n  return 0;\n}`
+  },
+  {
+    id: "CPP_METHOD_REGRESSION",
+    category: "Objects",
+    language: "cpp",
+    code: `#include <iostream>\nclass Player {\npublic:\n  int score = 100;\n  int getScore() { return score; }\n};\nint main() {\n  Player p;\n  std::cout << p.getScore() << std::endl;\n  return 0;\n}`
   }
 ];
 

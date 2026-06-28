@@ -11,7 +11,10 @@ export class CParser extends BaseParser {
     while (!this.match('EOF')) {
       try {
         const stmt = this.parseStatement();
-        if (stmt) statements.push(stmt);
+      if (stmt) {
+        if (Array.isArray(stmt)) statements.push(...stmt);
+        else statements.push(stmt);
+      }
       } catch (err) {
         throw err;
       }
@@ -19,7 +22,7 @@ export class CParser extends BaseParser {
     return statements;
   }
 
-  private parseStatement(): Statement | null {
+  protected parseStatement(): Statement | Statement[] | null {
     const t = this.peek();
 
     if (t.type === 'PUNCTUATION' && t.value === ';') {
@@ -102,32 +105,55 @@ export class CParser extends BaseParser {
           body,
           loc: this.getLoc(startToken)
         };
-      }
+      }      // Regular variable declaration e.g. int x = 10, y = 20;
+      const decls = [];
+      let baseType = varType.replace(/\*/g, '').trim();
+      let currentVarType = varType;
+      let currentNameToken = nameToken;
 
-      // Regular variable declaration e.g. int x = 10;
-      if (this.match('PUNCTUATION', '[')) {
-        this.next(); // consume [
-        if (!this.match('PUNCTUATION', ']')) {
-          this.parseExpression();
+      while (true) {
+        let isArray = false;
+        while (this.match('PUNCTUATION', '[')) {
+          this.next(); // consume [
+          if (!this.match('PUNCTUATION', ']')) {
+            this.parseExpression();
+          }
+          this.consume('PUNCTUATION', ']');
+          isArray = true;
         }
-        this.consume('PUNCTUATION', ']');
-        varType += '[]';
+
+        const typeStr = isArray ? currentVarType + '[]' : currentVarType;
+
+        let valueExpr = undefined;
+        if (this.match('OPERATOR', '=')) {
+          this.next();
+          valueExpr = this.parseExpression();
+        }
+
+        decls.push({
+          type: 'VarDeclaration' as const,
+          name: currentNameToken.value,
+          varType: typeStr,
+          valueExpr,
+          loc: this.getLoc(currentNameToken)
+        });
+
+        if (this.match('PUNCTUATION', ',')) {
+          this.next(); // consume ','
+          
+          currentVarType = baseType;
+          while (this.match('OPERATOR', '*') || this.match('OPERATOR', '**')) {
+            currentVarType += this.next().value;
+          }
+          currentNameToken = this.consume('IDENTIFIER');
+        } else {
+          break;
+        }
       }
 
-      let valueExpr: Expression | undefined;
-      if (this.match('OPERATOR', '=')) {
-        this.next();
-        valueExpr = this.parseExpression();
-      }
       this.consume('PUNCTUATION', ';');
 
-      return {
-        type: 'VarDeclaration',
-        name: nameToken.value,
-        varType,
-        valueExpr,
-        loc: this.getLoc(startToken)
-      };
+      return decls.length === 1 ? decls[0] : decls;
     }
 
     // Return
@@ -182,7 +208,7 @@ export class CParser extends BaseParser {
         thenBody = this.parseBlock();
       } else {
         const singleStmt = this.parseStatement();
-        if (singleStmt) thenBody.push(singleStmt);
+        if (singleStmt) { if (Array.isArray(singleStmt)) { thenBody.push(...singleStmt); } else { thenBody.push(singleStmt); } }
       }
 
       let elseBody: Statement[] | undefined;
@@ -194,7 +220,7 @@ export class CParser extends BaseParser {
           elseBody = this.parseBlock();
         } else {
           const singleStmt = this.parseStatement();
-          if (singleStmt) elseBody.push(singleStmt);
+          if (singleStmt) { if (Array.isArray(singleStmt)) { elseBody.push(...singleStmt); } else { elseBody.push(singleStmt); } }
         }
       }
 
@@ -220,7 +246,10 @@ export class CParser extends BaseParser {
         body = this.parseBlock();
       } else {
         const singleStmt = this.parseStatement();
-        if (singleStmt) body.push(singleStmt);
+        if (singleStmt) {
+          if (Array.isArray(singleStmt)) body.push(...singleStmt);
+          else body.push(singleStmt);
+        }
       }
 
       return {
@@ -246,7 +275,7 @@ export class CParser extends BaseParser {
           this.consume('OPERATOR', '=');
           const valExpr = this.parseExpression();
           init = {
-            type: 'VarDeclaration',
+            type: 'VarDeclaration' as const,
             name: nameToken.value,
             varType: dToken.value,
             valueExpr: valExpr,
@@ -283,7 +312,10 @@ export class CParser extends BaseParser {
         body = this.parseBlock();
       } else {
         const singleStmt = this.parseStatement();
-        if (singleStmt) body.push(singleStmt);
+        if (singleStmt) {
+          if (Array.isArray(singleStmt)) body.push(...singleStmt);
+          else body.push(singleStmt);
+        }
       }
 
       return {
@@ -316,26 +348,25 @@ export class CParser extends BaseParser {
       };
     }
 
-    // Input: scanf(format, &x)
+    // Input: scanf(format, &x, ...)
     if (t.type === 'KEYWORD' && t.value === 'scanf') {
       const startToken = this.next();
       this.consume('PUNCTUATION', '(');
       const formatStrToken = this.consume('STRING');
-      this.consume('PUNCTUATION', ',');
-      const targetExpr = this.parseExpression(); // should be &x AddressOf
+      
+      const targets = [];
+      while (this.match('PUNCTUATION', ',')) {
+        this.consume('PUNCTUATION', ',');
+        targets.push(this.parseExpression());
+      }
       this.consume('PUNCTUATION', ')');
       this.consume('PUNCTUATION', ';');
 
-      // Deduce expected type from format string e.g. %d -> integer, %f -> float, %s -> string
-      let expectedType: 'string' | 'number' | 'integer' | 'float' = 'string';
-      if (formatStrToken.value.includes('%d')) expectedType = 'integer';
-      else if (formatStrToken.value.includes('%f')) expectedType = 'float';
-
       return {
         type: 'Input',
-        prompt: `Enter ${expectedType}:`,
-        target: targetExpr,
-        expectedType,
+        prompt: 'scanf',
+        formatStr: formatStrToken.value,
+        targets,
         loc: this.getLoc(startToken)
       };
     }
@@ -355,7 +386,10 @@ export class CParser extends BaseParser {
     const body: Statement[] = [];
     while (!this.match('PUNCTUATION', '}') && !this.match('EOF')) {
       const stmt = this.parseStatement();
-      if (stmt) body.push(stmt);
+      if (stmt) {
+        if (Array.isArray(stmt)) body.push(...stmt);
+        else body.push(stmt);
+      }
     }
     this.consume('PUNCTUATION', '}');
     return body;

@@ -66,7 +66,13 @@ User Query: ${request.userMessage}`;
   }
 
 
-  const baseSystem = `You are a patient programming tutor explaining code execution to a complete beginner.
+  const baseSystem = request.feature === 'explain_step'
+    ? `You are a patient programming tutor explaining code execution to a complete beginner.
+Task: Explain the current execution step in 1 simple sentence.
+Rules:
+* Maximum 15 words. Be concise.
+* Plain text only. No markdown. No follow-up questions.`
+    : `You are a patient programming tutor explaining code execution to a complete beginner.
 Task: ${getTaskDescription(request.feature)}
 Rules:
 * Use analogies suitable for beginners (boxes, labels, containers).
@@ -75,19 +81,26 @@ Rules:
 * Maximum 50 words. Be concise.
 * Plain text only. No markdown. No follow-up questions.`;
 
-  const contextBlock = buildContextBlock(request.context, request.language);
+  const contextBlock = buildContextBlock(request.context, request.language, request.feature);
   
+  let maxTokens = 150;
+  if (request.feature === 'explain_step') {
+    maxTokens = 40;
+  } else if (request.feature === 'quiz') {
+    maxTokens = 300;
+  }
+
   return {
     system: baseSystem,
     user: contextBlock,
-    maxTokens: request.feature === 'quiz' ? 300 : 150,
+    maxTokens,
     temperature: request.feature === 'hint' ? 0.5 : 0.3
   };
 }
 
 function getTaskDescription(feature: string): string {
   const tasks: Record<string, string> = {
-    explain_step: 'Explain the current execution step in 1-2 simple sentences.',
+    explain_step: 'Explain the current execution step in 1 simple sentence.',
     explain_error: 'Explain why this error occurred and how to fix it in simple terms.',
     hint: 'Give a subtle hint about what to do next without revealing the answer.',
     quiz: 'Generate a multiple-choice question to test understanding of this concept.'
@@ -95,7 +108,14 @@ function getTaskDescription(feature: string): string {
   return tasks[feature] || tasks.explain_step;
 }
 
-function buildContextBlock(ctx: ExecutionContext, lang: string): string {
+function buildContextBlock(ctx: ExecutionContext, lang: string, feature?: string): string {
+  if (feature === 'explain_step') {
+    return `Language: ${lang}
+Current line ${ctx.lineNumber}: ${ctx.code.split('\n')[ctx.lineNumber - 1]?.trim() || 'N/A'}
+Operation: ${ctx.operation}
+${ctx.error ? `Error: ${ctx.error.message}` : ''}`;
+  }
+
   return `Language: ${lang}
 Current line ${ctx.lineNumber}: ${ctx.code.split('\n')[ctx.lineNumber - 1]?.trim() || 'N/A'}
 Operation: ${ctx.operation}

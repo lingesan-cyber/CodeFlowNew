@@ -145,6 +145,15 @@ let activeGenerator: Generator<ExecutionStep, ExecutionStep[], string | undefine
 // AbortController map: one controller per step index so stale fetches can be cancelled cleanly
 const abortControllers = new Map<number, AbortController>();
 
+const cancelOtherExplanationRequests = (keepIndex: number) => {
+  for (const [idx, controller] of abortControllers.entries()) {
+    if (idx !== keepIndex) {
+      controller.abort();
+      abortControllers.delete(idx);
+    }
+  }
+};
+
 const logStepTransition = (oldIdx: number, newIdx: number, speed: number) => {
   const delay = 1000 / speed;
   console.log(`[Playback Engine] Selected Speed: ${speed}x | Calculated Delay: ${delay}ms | Step Transition: ${oldIdx} -> ${newIdx} | Timestamp: ${new Date().toISOString()}`);
@@ -208,6 +217,9 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     if (fetchingSteps[index] || (explanations[index] && explanations[index].source === 'ai')) {
       return;
     }
+
+    // Cancel other active requests to avoid overloading Ollama
+    cancelOtherExplanationRequests(index);
 
     // Cancel any previous in-flight request for this same step index
     const existing = abortControllers.get(index);
@@ -276,6 +288,17 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
             }
           }
         }));
+      } else {
+        // Fallback explanation if AI is unavailable or timeout occurred
+        set((state) => ({
+          explanations: {
+            ...state.explanations,
+            [index]: {
+              text: "This step executes the current statement.",
+              source: 'ai'
+            }
+          }
+        }));
       }
     } catch (err) {
       // AbortError is expected during fast playback — not a real failure, swallow silently
@@ -284,6 +307,17 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
         return;
       }
       console.error(`fetchStepExplanation error for step ${index}:`, err);
+      
+      // Fallback explanation on network error or fetch crash
+      set((state) => ({
+        explanations: {
+          ...state.explanations,
+          [index]: {
+            text: "This step executes the current statement.",
+            source: 'ai'
+          }
+        }
+      }));
     } finally {
       abortControllers.delete(index);
       set((state) => ({
@@ -296,16 +330,8 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     const { steps } = get();
     if (steps.length === 0) return;
 
-    // Fetch current step
+    // Only fetch explanation for visible/current step. Do NOT request explanations for all steps simultaneously.
     get().fetchStepExplanation(index);
-
-    // Prefetch next 2 steps
-    if (index + 1 < steps.length) {
-      get().fetchStepExplanation(index + 1);
-    }
-    if (index + 2 < steps.length) {
-      get().fetchStepExplanation(index + 2);
-    }
   },
 
   toggleBreakpoint: (line) => set((state) => ({
@@ -322,6 +348,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     const { steps, currentStepIndex, speed } = get();
     if (index >= 0 && index < steps.length) {
       logStepTransition(currentStepIndex, index, speed);
+      cancelOtherExplanationRequests(index);
       set({ 
         currentStepIndex: index,
         stdout: steps[index].stdout
@@ -536,6 +563,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
       const nextStep = steps[nextIndex];
       logStepTransition(currentStepIndex, nextIndex, speed);
       
+      cancelOtherExplanationRequests(nextIndex);
       const isError = nextStep.operation === 'error' || !!nextStep.error;
 
       set({ 
@@ -565,6 +593,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
     if (currentStepIndex > 0) {
       const nextIndex = currentStepIndex - 1;
       logStepTransition(currentStepIndex, nextIndex, speed);
+      cancelOtherExplanationRequests(nextIndex);
       set({ 
         currentStepIndex: nextIndex,
         stdout: steps[nextIndex].stdout,
@@ -577,6 +606,7 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   jumpToStart: () => {
     const { steps } = get();
     if (steps.length > 0) {
+      cancelOtherExplanationRequests(0);
       set({ 
         currentStepIndex: 0,
         stdout: steps[0].stdout
@@ -587,9 +617,11 @@ export const useCodeFlowStore = create<CodeFlowState>((set, get) => ({
   jumpToEnd: () => {
     const { steps } = get();
     if (steps.length > 0) {
+      const lastIndex = steps.length - 1;
+      cancelOtherExplanationRequests(lastIndex);
       set({ 
-        currentStepIndex: steps.length - 1,
-        stdout: steps[steps.length - 1].stdout
+        currentStepIndex: lastIndex,
+        stdout: steps[lastIndex].stdout
       });
     }
   },

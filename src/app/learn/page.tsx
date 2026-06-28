@@ -188,7 +188,10 @@ export default function LearnIDE() {
       if (
         document.activeElement?.tagName === 'INPUT' || 
         document.activeElement?.tagName === 'TEXTAREA' ||
-        document.activeElement?.classList.contains('input')
+        document.activeElement?.classList.contains('input') ||
+        document.activeElement?.closest('.monaco-editor') ||
+        document.activeElement?.closest('.editor') ||
+        document.activeElement?.classList.contains('monaco-editor')
       ) {
         return;
       }

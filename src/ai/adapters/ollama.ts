@@ -14,6 +14,12 @@ export class OllamaAdapter implements AIProviderAdapter {
     const startTime = Date.now();
     const prompt = buildPrompt(request);
     
+    console.log("=== OLLAMA REQUEST ===");
+    console.log(`Model: ${this.config.model}`);
+    console.log(`Prompt User Length: ${prompt.user.length} chars`);
+    console.log(`Prompt System Length: ${prompt.system.length} chars`);
+    console.log("======================");
+
     const response = await axios.post(
       `${this.config.baseUrl}/api/generate`,
       {
@@ -32,13 +38,19 @@ export class OllamaAdapter implements AIProviderAdapter {
       { timeout: this.config.timeoutMs }
     );
 
+    const latencyMs = Date.now() - startTime;
+    console.log("=== OLLAMA RESPONSE ===");
+    console.log(`Latency: ${latencyMs}ms`);
+    console.log(`Status: ${response.status}`);
+    console.log("=======================");
+
     return {
       explanation: response.data.response.trim(),
       confidence: 'high',
       generatedAt: new Date().toISOString(),
       provider: this.name,
       model: this.config.model,
-      latencyMs: Date.now() - startTime
+      latencyMs
     };
   }
 

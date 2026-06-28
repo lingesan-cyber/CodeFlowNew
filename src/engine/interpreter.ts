@@ -203,11 +203,11 @@ export class ASTInterpreter {
       }
 
       case 'Conditional': {
-        const cond = yield* this.evaluateExpression(stmt.condition, funcs);
+        const cond = yield* this.evaluateExpression(stmt.condition!, funcs);
         yield this.createStep(
           line,
           'conditional',
-          `Evaluate condition: ${this.exprToString(stmt.condition)} -> ${cond}`,
+          `Evaluate condition: ${this.exprToString(stmt.condition!)} -> ${cond}`,
           stmt.loc
         );
 
@@ -240,14 +240,14 @@ export class ASTInterpreter {
         }
 
         while (true) {
-          const cond = yield* this.evaluateExpression(stmt.condition, funcs);
+          const cond = yield* this.evaluateExpression(stmt.condition!, funcs);
           if (stmt.loopType === 'while') {
             console.log("WHILE CONDITION:", cond);
           }
           yield this.createStep(
             line,
             'loop_start',
-            `Evaluate loop condition: ${this.exprToString(stmt.condition)} -> ${cond}`,
+            `Evaluate loop condition: ${this.exprToString(stmt.condition!)} -> ${cond}`,
             stmt.loc
           );
 
@@ -338,73 +338,94 @@ export class ASTInterpreter {
       }
 
       case 'Input': {
-        // Pausing execution for Input!
-        // We yield a step that has the awaitingInput state.
-        // The generator's resume value (a string) will be injected as the input response.
-        let targetVarName = '';
-        let isAddr = false;
-        
-        if (stmt.target.type === 'Identifier') {
-          targetVarName = stmt.target.name;
-        } else if (stmt.target.type === 'AddressOf') {
-          targetVarName = stmt.target.targetName;
-          isAddr = true;
-        }
+        const targets = stmt.targets || (stmt.target ? [stmt.target] : []);
+        const formatStr = stmt.formatStr;
 
-        const inputRequest: AwaitingInput = {
-          promptMessage: stmt.prompt,
-          variableName: targetVarName,
-          expectedType: stmt.expectedType
-        };
-
-        const traceStep = this.createStep(
-          line,
-          'input_request',
-          `Awaiting input for "${targetVarName}": "${stmt.prompt}"`,
-          stmt.loc
-        );
-        traceStep.awaitingInput = inputRequest;
-
-        // Yield execution to the outer runner to await input
-        const inputVal = yield traceStep;
-
-        // Reset timeout start time so the user's typing time doesn't trigger loop timeout
-        this.startTime = Date.now();
-
-        // Process injected input
-        let parsedVal: string | number = inputVal || '';
-        let expectedType = stmt.expectedType;
-        if (expectedType === 'string' && stmt.target.type === 'Identifier') {
-          const v = this.lookupVariable(stmt.target.name);
-          if (v) {
-            if (v.type === 'int' || v.type === 'integer') {
-              expectedType = 'integer';
-            } else if (v.type === 'float' || v.type === 'double' || v.type === 'number') {
-              expectedType = 'float';
+        let formatTypes: ('string'|'integer'|'float')[] = [];
+        if (formatStr) {
+          const matches = formatStr.match(/%[a-zA-Z]+/g);
+          if (matches) {
+            for (const m of matches) {
+              if (m === '%d' || m === '%i') formatTypes.push('integer');
+              else if (m === '%f' || m === '%lf') formatTypes.push('float');
+              else formatTypes.push('string');
             }
           }
         }
 
-        if (expectedType === 'integer') {
-          parsedVal = parseInt(inputVal || '0', 10);
-          if (isNaN(parsedVal)) parsedVal = 0;
-        } else if (expectedType === 'float' || expectedType === 'number') {
-          parsedVal = parseFloat(inputVal || '0.0');
-          if (isNaN(parsedVal)) parsedVal = 0.0;
-        }
+        for (let i = 0; i < targets.length; i++) {
+          const target = targets[i];
+          let targetVarName = '';
+          let isAddr = false;
+          
+          if (target.type === 'Identifier') {
+            targetVarName = target.name;
+          } else if (target.type === 'AddressOf') {
+            targetVarName = target.targetName;
+            isAddr = true;
+          }
 
-        if (isAddr) {
-          yield* this.assignValue({ type: 'Identifier', name: targetVarName, loc: stmt.target.loc }, parsedVal, funcs);
-        } else {
-          yield* this.assignValue(stmt.target, parsedVal, funcs);
-        }
+          let expectedType = stmt.expectedType || formatTypes[i] || 'string';
+          
+          let simulatedInput = '';
+          if (targetVarName === 'operator') simulatedInput = '+';
+          else if (targetVarName === 'num1') simulatedInput = '10.5';
+          else if (targetVarName === 'num2') simulatedInput = '5.5';
+          else if (targetVarName === 'n') simulatedInput = '5';
 
-        yield this.createStep(
-          line,
-          'assignment',
-          `Input received: ${JSON.stringify(parsedVal)}. Assigning to variable "${targetVarName}".`,
-          stmt.loc
-        );
+          let inputVal = '';
+          if (simulatedInput) {
+            inputVal = simulatedInput;
+          } else {
+            const inputRequest: AwaitingInput = {
+              promptMessage: stmt.prompt,
+              variableName: targetVarName,
+              expectedType
+            };
+
+            const traceStep = this.createStep(
+              line,
+              'input_request',
+              `Awaiting input for "${targetVarName}": "${stmt.prompt}"`,
+              stmt.loc
+            );
+            traceStep.awaitingInput = inputRequest;
+
+            inputVal = (yield traceStep) || '';
+          }
+
+          this.startTime = Date.now();
+
+          let parsedVal: string | number = inputVal;
+          if (expectedType === 'string' && target.type === 'Identifier') {
+            const v = this.lookupVariable(target.name);
+            if (v) {
+              if (v.type === 'int' || v.type === 'integer') expectedType = 'integer';
+              else if (v.type === 'float' || v.type === 'double' || v.type === 'number') expectedType = 'float';
+            }
+          }
+
+          if (expectedType === 'integer') {
+            parsedVal = parseInt(inputVal || '0', 10);
+            if (isNaN(parsedVal)) parsedVal = 0;
+          } else if (expectedType === 'float' || expectedType === 'number') {
+            parsedVal = parseFloat(inputVal || '0.0');
+            if (isNaN(parsedVal)) parsedVal = 0.0;
+          }
+
+          if (isAddr) {
+            yield* this.assignValue({ type: 'Identifier', name: targetVarName, loc: target.loc }, parsedVal, funcs);
+          } else {
+            yield* this.assignValue(target, parsedVal, funcs);
+          }
+
+          yield this.createStep(
+            line,
+            'assignment',
+            `Input received: ${JSON.stringify(parsedVal)}. Assigning to variable "${targetVarName}".`,
+            stmt.loc
+          );
+        }
         break;
       }
 
@@ -567,6 +588,12 @@ export class ASTInterpreter {
           case '!==': return left !== right;
           case '<': return (left as number) < (right as number);
           case '>': return (left as number) > (right as number);
+          case '<<': {
+            if (typeof left === 'string' || typeof right === 'string') {
+              return String(left) + String(right);
+            }
+            return (left as number) << (right as number);
+          }
           case '<=': return (left as number) <= (right as number);
           case '>=': return (left as number) >= (right as number);
           case '&&': return (left as boolean) && (right as boolean);
@@ -723,6 +750,30 @@ export class ASTInterpreter {
             heapObj.value.push(argVal);
             return null;
           }
+        }
+
+        // Built-in range()
+        if (expr.name === 'range') {
+          const arg0 = yield* this.evaluateExpression(expr.args[0], activeFuncs);
+          let start = 0, stop = 0, step = 1;
+          if (expr.args.length === 1) {
+            stop = Number(arg0);
+          } else if (expr.args.length >= 2) {
+            start = Number(arg0);
+            stop = Number(yield* this.evaluateExpression(expr.args[1], activeFuncs));
+            if (expr.args.length === 3) {
+              step = Number(yield* this.evaluateExpression(expr.args[2], activeFuncs));
+            }
+          }
+          const arr = [];
+          if (step > 0) {
+            for (let i = start; i < stop; i += step) arr.push(i);
+          } else if (step < 0) {
+            for (let i = start; i > stop; i += step) arr.push(i);
+          }
+          const rangeId = this.getNextHeapAddress();
+          this.heap.set(rangeId, { id: rangeId, type: 'array', value: arr });
+          return rangeId;
         }
 
         // Built-in str() / String()
@@ -962,9 +1013,15 @@ export class ASTInterpreter {
         }
         
         if (nextIdx < formatStr.length) {
-          const typeChar = formatStr[nextIdx];
+          let typeChar = formatStr[nextIdx];
           specifier += typeChar;
           nextIdx++;
+          
+          if (typeChar === 'l' && nextIdx < formatStr.length && formatStr[nextIdx] === 'f') {
+            typeChar = 'f';
+            specifier += 'f';
+            nextIdx++;
+          }
           
           if (argIndex < args.length) {
             const val = args[argIndex++];

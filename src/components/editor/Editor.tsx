@@ -217,7 +217,7 @@ export default function Editor({ readOnly = false }: EditorProps) {
           {/* Action buttons */}
           {playbackState === 'playing' || playbackState === 'paused' || playbackState === 'awaiting_input' ? (
             <button
-              onClick={stopExecution}
+              onClick={(e) => { e.currentTarget.blur(); stopExecution(); }}
               className="flex items-center justify-center space-x-1 bg-red-600 hover:bg-red-500 active:scale-95 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-lg shadow-red-900/20 transition-all duration-200 cursor-pointer"
               aria-label="Stop execution"
             >
@@ -226,7 +226,9 @@ export default function Editor({ readOnly = false }: EditorProps) {
             </button>
           ) : (
             <button
-              onClick={runCode}
+              onClick={(e) => { e.currentTarget.blur(); runCode(); }}
+              onKeyDown={(e) => { if (e.key === ' ' || e.code === 'Space') e.preventDefault(); }}
+              onKeyUp={(e) => { if (e.key === ' ' || e.code === 'Space') e.preventDefault(); }}
               className="flex items-center justify-center space-x-1 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-lg shadow-blue-900/20 transition-all duration-200 cursor-pointer"
               aria-label="Run program (Ctrl+Enter)"
             >

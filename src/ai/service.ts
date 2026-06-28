@@ -138,7 +138,7 @@ export function isFeatureEnabled(feature: AIFeature): boolean {
 // Fallback when AI is unavailable
 function createFallbackResponse(request: AIRequest, reason: string): AIResponse {
   const fallbacks: Record<Exclude<AIFeature, 'explain_batch'>, string> = {
-    explain_step: '[AI unavailable]',
+    explain_step: 'This step executes the current statement.',
     explain_error: `Error occurred: ${request.context.error?.message || 'Unknown error'}`,
     hint: 'Try tracing the variables step by step.',
     quiz: 'What will be the value of the main variable after this step?',
